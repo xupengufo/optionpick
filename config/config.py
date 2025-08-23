@@ -71,13 +71,49 @@ VISUALIZATION_CONFIG = {
 # 数据源配置
 DATA_CONFIG = {
     "popular_stocks": [
-        "AAPL", "MSFT", "GOOGL", "AMZN", "TSLA", "META", "NVDA", "SPY", "QQQ", "IWM",
-        "XLF", "XLE", "XLK", "GLD", "SLV", "TLT", "NFLX", "DIS", "JPM", "BAC"
+        # 科技股
+        "AAPL", "MSFT", "GOOGL", "AMZN", "TSLA", "META", "NVDA", "NFLX", "CRM", "ADBE",
+        "ORCL", "INTC", "AMD", "QCOM", "AVGO", "PYPL", "SHOP", "SQ", "ZOOM", "ROKU",
+        
+        # 金融股
+        "JPM", "BAC", "WFC", "C", "GS", "MS", "V", "MA", "AXP", "BRK.B",
+        
+        # 传统蓝筹股
+        "JNJ", "PG", "KO", "PEP", "WMT", "HD", "MCD", "DIS", "IBM", "GE",
+        
+        # 医疗生物技术
+        "UNH", "PFE", "JNJ", "ABT", "TMO", "DHR", "BMY", "ABBV", "LLY", "MRK",
+        
+        # 能源股
+        "XOM", "CVX", "COP", "SLB", "HAL", "OXY", "MPC", "VLO", "PSX", "EOG"
     ],
     "etf_list": [
-        "SPY", "QQQ", "IWM", "XLF", "XLE", "XLK", "XLV", "XLI", "XLU", "XLP",
-        "GLD", "SLV", "TLT", "HYG", "LQD", "EEM", "VIX", "UVXY", "SQQQ", "TQQQ"
-    ]
+        # 市场指数ETF
+        "SPY", "QQQ", "IWM", "DIA", "VTI", "ITOT", "VEA", "VWO", "EEM", "EFA",
+        
+        # 行业ETF
+        "XLF", "XLE", "XLK", "XLV", "XLI", "XLU", "XLP", "XLY", "XLB", "XLRE",
+        
+        # 大宗商品ETF
+        "GLD", "SLV", "USO", "UNG", "DBC", "PDBC", "IAU", "PPLT", "PALL", "JJC",
+        
+        # 债券ETF
+        "TLT", "IEF", "SHY", "AGG", "BND", "HYG", "LQD", "JNK", "EMB", "BNDX",
+        
+        # 波动率和反向ETF
+        "VIX", "UVXY", "SVXY", "SQQQ", "TQQQ", "SPXU", "UPRO", "TZA", "TNA", "LABU"
+    ],
+    "stock_categories": {
+        "🏯 科技股": ["AAPL", "MSFT", "GOOGL", "AMZN", "TSLA", "META", "NVDA", "NFLX"],
+        "🏦 金融股": ["JPM", "BAC", "WFC", "C", "GS", "MS", "V", "MA"],
+        "🏭 传统蓝筹": ["JNJ", "PG", "KO", "PEP", "WMT", "HD", "MCD", "DIS"],
+        "💊 医疗生物": ["UNH", "PFE", "ABT", "TMO", "DHR", "BMY", "ABBV", "LLY"],
+        "⚡ 能源股": ["XOM", "CVX", "COP", "SLB", "HAL", "OXY", "MPC", "VLO"],
+        "💹 市场指数": ["SPY", "QQQ", "IWM", "DIA", "VTI", "ITOT"],
+        "📊 行业ETF": ["XLF", "XLE", "XLK", "XLV", "XLI", "XLU", "XLP", "XLY"],
+        "🥇 大宗商品": ["GLD", "SLV", "USO", "UNG", "DBC", "PDBC"],
+        "📈 波动率": ["VIX", "UVXY", "SVXY", "SQQQ", "TQQQ", "SPXU"]
+    }
 }
 
 # 日志配置

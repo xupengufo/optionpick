@@ -97,17 +97,107 @@ class OptionsToolApp:
         
         # 股票选择
         st.sidebar.subheader("股票池")
+        
+        # 添加股票分类展示
+        with st.sidebar.expander("📊 热门股票分类", expanded=False):
+            categories = DATA_CONFIG.get('stock_categories', {})
+            
+            # 显示每个分类
+            for category, stocks in categories.items():
+                st.markdown(f"**{category}:**")
+                # 将股票代码按每衔3个分行显示
+                for i in range(0, len(stocks), 3):
+                    row_stocks = stocks[i:i+3]
+                    st.markdown(f"  `{' | '.join(row_stocks)}`")
+                st.markdown("")  # 空行
+        
+        # 预设股票池
         available_symbols = DATA_CONFIG['popular_stocks'] + DATA_CONFIG['etf_list']
         
-        selected_symbols = st.sidebar.multiselect(
-            "选择要分析的股票",
-            options=available_symbols,
-            default=st.session_state.selected_symbols,
-            help="选择要分析的股票代码"
+        # 快速选择分类
+        st.sidebar.markdown("**⚡ 快速选择分类:**")
+        category_choice = st.sidebar.selectbox(
+            "选择一个分类快速添加",
+            options=["不选择"] + list(DATA_CONFIG.get('stock_categories', {}).keys()),
+            help="选择一个分类可以快速添加该分类下的所有股票"
         )
         
-        if selected_symbols:
-            st.session_state.selected_symbols = selected_symbols
+        # 添加自定义输入功能
+        st.sidebar.markdown("**预设股票选择:**")
+        selected_symbols = st.sidebar.multiselect(
+            "从预设列表中选择",
+            options=available_symbols,
+            default=st.session_state.selected_symbols if all(symbol in available_symbols for symbol in st.session_state.selected_symbols) else [],
+            help="选择要分析的热门股票代码"
+        )
+        
+        # 处理分类选择
+        if category_choice != "不选择":
+            category_stocks = DATA_CONFIG.get('stock_categories', {}).get(category_choice, [])
+            if category_stocks:
+                # 合并分类中的股票
+                selected_symbols = list(set(selected_symbols + category_stocks))
+                st.sidebar.success(f"✅ 已添加 {category_choice} 分类下的 {len(category_stocks)} 只股票")
+        
+        # 自定义股票代码输入
+        st.sidebar.markdown("**自定义股票代码:**")
+        custom_symbols_input = st.sidebar.text_area(
+            "输入股票代码（每行一个）",
+            height=100,
+            help="输入格式：\nAAPL\nTSLA\nGOOGL\n等，每行一个代码",
+            placeholder="AAPL\nTSLA\nNVDA\nMSFT"
+        )
+        
+        # 处理自定义输入
+        custom_symbols = []
+        if custom_symbols_input:
+            custom_symbols = [symbol.strip().upper() for symbol in custom_symbols_input.split('\n') if symbol.strip()]
+            
+            # 验证股票代码有效性
+            if st.sidebar.button("✅ 验证自定义代码", help="检查输入的股票代码是否有效"):
+                with st.sidebar.spinner("验证中..."):
+                    valid_symbols = []
+                    invalid_symbols = []
+                    
+                    for symbol in custom_symbols:
+                        if self.data_manager.validate_symbol(symbol):
+                            valid_symbols.append(symbol)
+                        else:
+                            invalid_symbols.append(symbol)
+                    
+                    if valid_symbols:
+                        st.sidebar.success(f"✅ 有效代码: {', '.join(valid_symbols)}")
+                    if invalid_symbols:
+                        st.sidebar.error(f"❌ 无效代码: {', '.join(invalid_symbols)}")
+                        
+                    # 更新自定义代码列表，只保留有效的
+                    custom_symbols = valid_symbols
+        
+        # 合并预设选择和自定义输入
+        all_selected_symbols = list(set(selected_symbols + custom_symbols))
+        
+        # 显示最终选择的股票
+        if all_selected_symbols:
+            st.sidebar.markdown("**当前选择的股票:**")
+            symbols_display = ", ".join(all_selected_symbols)
+            if len(symbols_display) > 50:
+                symbols_display = symbols_display[:50] + "..."
+            st.sidebar.info(f"{len(all_selected_symbols)} 只股票: {symbols_display}")
+            
+            # 添加清空按钮
+            col1, col2 = st.sidebar.columns(2)
+            with col1:
+                if st.button("🗑️ 清空选择", help="清空所有已选择的股票"):
+                    st.session_state.selected_symbols = []
+                    st.rerun()
+            with col2:
+                if st.button("🔄 重置默认", help="重置为默认股票列表"):
+                    st.session_state.selected_symbols = DATA_CONFIG['popular_stocks'][:5]
+                    st.rerun()
+            
+            st.session_state.selected_symbols = all_selected_symbols
+        else:
+            st.sidebar.warning("⚠️ 请选择至少一只股票进行分析")
         
         # 筛选预设
         st.sidebar.subheader("筛选策略")
