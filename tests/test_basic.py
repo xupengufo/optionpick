@@ -10,6 +10,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np
 from src.option_analytics.pricing import BlackScholesCalculator, ProbabilityCalculator, OptionAnalyzer
 from src.risk_management.risk_manager import RiskCalculator, PositionSizer, RiskManager
+from src.screening.screener import OptionsScreener
 
 class TestBlackScholesCalculator(unittest.TestCase):
     """测试Black-Scholes计算器"""
@@ -213,6 +214,100 @@ class TestRiskManager(unittest.TestCase):
         valid_recommendations = ['STRONG_BUY', 'BUY', 'HOLD', 'CAUTION', 'AVOID', 'ERROR']
         self.assertIn(analysis['recommendation'], valid_recommendations)
 
+class TestOptionsScreenerConfigEnforcement(unittest.TestCase):
+    """测试筛选配置是否被真正执行"""
+
+    def setUp(self):
+        self.screener = OptionsScreener()
+
+    def test_covered_call_respects_profit_probability_and_min_return(self):
+        self.screener.config.update({
+            'min_delta': 0.1,
+            'max_delta': 0.5,
+            'min_profit_probability': 70,
+            'min_annualized_return': 10,
+        })
+
+        low_prob = {
+            'greeks': {'delta': 0.2},
+            'returns': {'annualized_yield': 20},
+            'probabilities': {'prob_profit_short': 60},
+        }
+        self.assertFalse(self.screener._validate_covered_call(low_prob))
+
+        low_return = {
+            'greeks': {'delta': 0.2},
+            'returns': {'annualized_yield': 8},
+            'probabilities': {'prob_profit_short': 80},
+        }
+        self.assertFalse(self.screener._validate_covered_call(low_return))
+
+        valid = {
+            'greeks': {'delta': 0.2},
+            'returns': {'annualized_yield': 12},
+            'probabilities': {'prob_profit_short': 80},
+        }
+        self.assertTrue(self.screener._validate_covered_call(valid))
+
+    def test_short_strangle_respects_min_return(self):
+        self.screener.config.update({
+            'min_profit_probability': 40,
+            'min_annualized_return': 15,
+        })
+
+        insufficient = {
+            'returns': {
+                'profit_probability': 50,
+                'net_credit': 200,
+                'annualized_yield': 10,
+            }
+        }
+        self.assertFalse(self.screener._validate_short_strangle(insufficient))
+
+        valid = {
+            'returns': {
+                'profit_probability': 50,
+                'net_credit': 200,
+                'annualized_yield': 20,
+            }
+        }
+        self.assertTrue(self.screener._validate_short_strangle(valid))
+
+
+class TestStrategySchemaConsistency(unittest.TestCase):
+    """测试策略输出字段一致性"""
+
+    def test_short_strangle_contains_annualized_yield(self):
+        from src.option_analytics.strategies import StrategyAnalyzer
+
+        analyzer = StrategyAnalyzer()
+        call_data = {
+            'type': 'call',
+            'strike': 105,
+            'lastPrice': 1.2,
+            'bid': 1.1,
+            'ask': 1.3,
+            'volume': 100,
+            'openInterest': 200,
+            'impliedVolatility': 0.2
+        }
+        put_data = {
+            'type': 'put',
+            'strike': 95,
+            'lastPrice': 1.1,
+            'bid': 1.0,
+            'ask': 1.2,
+            'volume': 120,
+            'openInterest': 240,
+            'impliedVolatility': 0.22
+        }
+
+        result = analyzer.analyze_short_strangle(100, call_data, put_data, 30)
+        self.assertIn('returns', result)
+        self.assertIn('annualized_yield', result['returns'])
+        self.assertGreaterEqual(result['returns']['annualized_yield'], 0)
+
+
 def run_all_tests():
     """运行所有测试"""
     print("运行期权工具基础测试...")
@@ -224,7 +319,9 @@ def run_all_tests():
         TestProbabilityCalculator,
         TestRiskCalculator,
         TestPositionSizer,
-        TestRiskManager
+        TestRiskManager,
+        TestOptionsScreenerConfigEnforcement,
+        TestStrategySchemaConsistency
     ]
     
     total_tests = 0

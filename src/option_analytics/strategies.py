@@ -252,6 +252,7 @@ class StrategyAnalyzer:
                     'lower_breakeven': lower_breakeven,
                     'profit_zone_width': profit_zone_width,
                     'profit_probability': profit_prob,
+                    'annualized_yield': (net_credit / (stock_price * 100)) * (365 / days_to_expiry) * 100 if stock_price > 0 and days_to_expiry > 0 else 0,
                 },
                 'risk_metrics': {
                     'expected_move': expected_move,
