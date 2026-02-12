@@ -236,10 +236,37 @@ class StrategyAnalyzer:
                 profit_prob = min(100, (profit_zone_width / (2 * expected_move)) * 100)
             else:
                 profit_prob = 50
+
+            call_greeks = call_analysis.get('greeks', {})
+            put_greeks = put_analysis.get('greeks', {})
+            net_greeks = {
+                'delta': call_greeks.get('delta', 0) + put_greeks.get('delta', 0),
+                'gamma': call_greeks.get('gamma', 0) + put_greeks.get('gamma', 0),
+                'theta': call_greeks.get('theta', 0) + put_greeks.get('theta', 0),
+                'vega': call_greeks.get('vega', 0) + put_greeks.get('vega', 0),
+                'rho': call_greeks.get('rho', 0) + put_greeks.get('rho', 0),
+            }
+
+            call_liq = call_analysis.get('liquidity', {})
+            put_liq = put_analysis.get('liquidity', {})
+            combined_mid = (call_analysis.get('basic_info', {}).get('mid_price', 0) +
+                            put_analysis.get('basic_info', {}).get('mid_price', 0))
+            combined_spread = (call_liq.get('bid_ask_spread', 0) +
+                               put_liq.get('bid_ask_spread', 0))
+            combined_liquidity = {
+                'bid_ask_spread': combined_spread,
+                'bid_ask_spread_pct': ((combined_spread / combined_mid) * 100)
+                if combined_mid > 0 else 0,
+                # 双腿组合的可成交量受较弱一腿约束
+                'volume': min(call_liq.get('volume', 0), put_liq.get('volume', 0)),
+                'open_interest': min(call_liq.get('open_interest', 0),
+                                     put_liq.get('open_interest', 0)),
+            }
             
             return {
                 'strategy_type': 'short_strangle',
                 'stock_price': stock_price,
+                'strike': put_strike,
                 'strikes': {
                     'put_strike': put_strike,
                     'call_strike': call_strike
@@ -254,10 +281,22 @@ class StrategyAnalyzer:
                     'profit_probability': profit_prob,
                     'annualized_yield': (net_credit / (stock_price * 100)) * (365 / days_to_expiry) * 100 if stock_price > 0 and days_to_expiry > 0 else 0,
                 },
+                'probabilities': {
+                    'prob_profit_short': profit_prob,
+                },
+                'greeks': net_greeks,
+                'option_details': {
+                    'basic_info': {
+                        'implied_volatility': current_iv,
+                        'put_strike': put_strike,
+                        'call_strike': call_strike,
+                    },
+                    'liquidity': combined_liquidity,
+                },
                 'risk_metrics': {
                     'expected_move': expected_move,
                     'current_iv': current_iv,
-                    'delta_neutral': abs(call_analysis['greeks']['delta'] + put_analysis['greeks']['delta']) < 0.1
+                    'delta_neutral': abs(net_greeks['delta']) < 0.1
                 },
                 'days_to_expiry': days_to_expiry
             }

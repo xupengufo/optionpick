@@ -116,6 +116,27 @@ DATA_CONFIG = {
     }
 }
 
+# GitHub 公开项目股票池配置
+GITHUB_POOL_CONFIG = {
+    "default_curated_size": 30,
+    "min_curated_size": 10,
+    "max_curated_size": 100,
+    "sources": {
+        # 项目: yfiua/index-constituents
+        "sp500": {
+            "name": "S&P 500",
+            "url": "https://yfiua.github.io/index-constituents/constituents-sp500.csv",
+            "symbol_columns": ["symbol", "Symbol", "ticker", "Ticker"],
+        },
+        # 项目: yfiua/index-constituents
+        "nasdaq100": {
+            "name": "NASDAQ 100",
+            "url": "https://yfiua.github.io/index-constituents/constituents-nasdaq100.csv",
+            "symbol_columns": ["symbol", "Symbol", "ticker", "Ticker"],
+        },
+    },
+}
+
 # 日志配置
 LOGGING_CONFIG = {
     "level": "INFO",

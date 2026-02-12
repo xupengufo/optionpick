@@ -175,8 +175,7 @@ class OptionsVisualizer:
                 current_volatility = stock_data.get('current_volatility', 0)
                 
                 if current_volatility > 0:
-                    # 这里应该计算真实的IV rank，简化处理
-                    iv_rank = np.random.uniform(20, 80)  # 模拟数据
+                    iv_rank = self._estimate_iv_rank(stock_data)
                     iv_data.append({
                         'Symbol': symbol,
                         'IV_Rank': iv_rank,
@@ -226,6 +225,26 @@ class OptionsVisualizer:
         except Exception as e:
             logger.error(f"Error creating IV rank distribution: {e}")
             return go.Figure()
+
+    def _estimate_iv_rank(self, stock_data: Dict) -> float:
+        """根据历史波动率估算 IV Rank（0-100）"""
+        try:
+            current_volatility = stock_data.get('current_volatility', 0)
+            historical_data = stock_data.get('historical_data', {})
+            vol_map = historical_data.get('Volatility', {}) if isinstance(historical_data, dict) else {}
+            if current_volatility <= 0 or not isinstance(vol_map, dict) or not vol_map:
+                return 50.0
+
+            vol_series = pd.to_numeric(pd.Series(list(vol_map.values())), errors='coerce').dropna()
+            vol_series = vol_series[vol_series > 0]
+            if vol_series.empty:
+                return 50.0
+
+            rank = float((vol_series < current_volatility).sum()) / float(len(vol_series)) * 100
+            return max(0.0, min(100.0, rank))
+        except Exception as e:
+            logger.warning(f"Failed to estimate IV rank: {e}")
+            return 50.0
     
     def plot_portfolio_risk_analysis(self, portfolio_metrics: Dict) -> go.Figure:
         """绘制投资组合风险分析"""
@@ -417,6 +436,12 @@ class OptionsVisualizer:
             return self._cash_secured_put_payoff(strategy_analysis, prices)
         elif strategy_type == 'short_strangle':
             return self._short_strangle_payoff(strategy_analysis, prices)
+        elif strategy_type == 'bull_put_spread':
+            return self._bull_put_spread_payoff(strategy_analysis, prices)
+        elif strategy_type == 'bear_call_spread':
+            return self._bear_call_spread_payoff(strategy_analysis, prices)
+        elif strategy_type == 'iron_condor':
+            return self._iron_condor_payoff(strategy_analysis, prices)
         else:
             return np.zeros_like(prices)
     
@@ -453,6 +478,44 @@ class OptionsVisualizer:
         call_pnl = np.where(prices > call_strike, -(prices - call_strike) * 100, 0)
         
         return put_pnl + call_pnl + net_credit
+
+    def _bull_put_spread_payoff(self, strategy_analysis: Dict, prices: np.ndarray) -> np.ndarray:
+        """牛市看跌价差收益（short high put + long low put）"""
+        strikes = strategy_analysis.get('strikes', {})
+        put_short = strikes.get('put_short', strategy_analysis.get('strike', 95))
+        put_long = strikes.get('put_long', put_short - 5)
+        net_credit = strategy_analysis.get('returns', {}).get('net_credit', 0)
+
+        short_put_pnl = np.where(prices < put_short, -(put_short - prices) * 100, 0)
+        long_put_pnl = np.where(prices < put_long, (put_long - prices) * 100, 0)
+        return short_put_pnl + long_put_pnl + net_credit
+
+    def _bear_call_spread_payoff(self, strategy_analysis: Dict, prices: np.ndarray) -> np.ndarray:
+        """熊市看涨价差收益（short low call + long high call）"""
+        strikes = strategy_analysis.get('strikes', {})
+        call_short = strikes.get('call_short', strategy_analysis.get('strike', 105))
+        call_long = strikes.get('call_long', call_short + 5)
+        net_credit = strategy_analysis.get('returns', {}).get('net_credit', 0)
+
+        short_call_pnl = np.where(prices > call_short, -(prices - call_short) * 100, 0)
+        long_call_pnl = np.where(prices > call_long, (prices - call_long) * 100, 0)
+        return short_call_pnl + long_call_pnl + net_credit
+
+    def _iron_condor_payoff(self, strategy_analysis: Dict, prices: np.ndarray) -> np.ndarray:
+        """铁鹰收益（short put spread + short call spread）"""
+        strikes = strategy_analysis.get('strikes', {})
+        put_long = strikes.get('put_long', 90)
+        put_short = strikes.get('put_short', 95)
+        call_short = strikes.get('call_short', 105)
+        call_long = strikes.get('call_long', 110)
+        net_credit = strategy_analysis.get('returns', {}).get('net_credit', 0)
+
+        short_put_pnl = np.where(prices < put_short, -(put_short - prices) * 100, 0)
+        long_put_pnl = np.where(prices < put_long, (put_long - prices) * 100, 0)
+        short_call_pnl = np.where(prices > call_short, -(prices - call_short) * 100, 0)
+        long_call_pnl = np.where(prices > call_long, (prices - call_long) * 100, 0)
+
+        return short_put_pnl + long_put_pnl + short_call_pnl + long_call_pnl + net_credit
     
     def _find_breakeven_points(self, strategy_analysis: Dict, prices: np.ndarray, payoffs: np.ndarray) -> List[float]:
         """寻找盈亏平衡点"""
@@ -495,6 +558,8 @@ class OptionsVisualizer:
             'covered_call': '备兑看涨期权',
             'cash_secured_put': '现金担保看跌期权',
             'short_strangle': '卖出宽跨式',
+            'bull_put_spread': '牛市看跌价差',
+            'bear_call_spread': '熊市看涨价差',
             'iron_condor': '铁鹰策略',
             'short_straddle': '卖出跨式'
         }

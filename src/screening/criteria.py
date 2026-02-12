@@ -282,16 +282,27 @@ class ScreeningUtils:
                 else:
                     earnings_label = "-"
 
+                strikes = opp.get('strikes', {})
+                if opp.get('strategy_type') == 'short_strangle' and strikes:
+                    strike_display = f"{strikes.get('put_strike', 0):.0f}/{strikes.get('call_strike', 0):.0f}"
+                else:
+                    strike_display = opp.get('strike', 0)
+
+                profit_prob = opp.get('probabilities', {}).get(
+                    'prob_profit_short',
+                    opp.get('returns', {}).get('profit_probability', 0)
+                )
+
                 result = {
                     'Symbol': opp.get('symbol', ''),
                     'Strategy': opp.get('strategy_type', ''),
-                    'Strike': opp.get('strike', 0),
+                    'Strike': strike_display,
                     'Expiry': opp.get('expiry_date', ''),
                     'DTE': opp.get('days_to_expiry', 0),
                     'Earnings': earnings_label,
                     'Premium': opp.get('returns', {}).get('max_profit', 0),
                     'Annualized_Return': f"{opp.get('returns', {}).get('annualized_yield', 0):.1f}%",
-                    'Profit_Prob': f"{opp.get('probabilities', {}).get('prob_profit_short', 0):.1f}%",
+                    'Profit_Prob': f"{profit_prob:.1f}%",
                     'Delta': f"{opp.get('greeks', {}).get('delta', 0):.3f}",
                     'Theta': f"{opp.get('greeks', {}).get('theta', 0):.3f}",
                     'IV': f"{opp.get('option_details', {}).get('basic_info', {}).get('implied_volatility', 0):.1f}%",

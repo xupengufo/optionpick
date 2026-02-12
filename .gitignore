@@ -26,6 +26,7 @@ MANIFEST
 venv/
 env/
 ENV/
+.venv/
 
 # IDE
 .vscode/
@@ -48,6 +49,7 @@ data/cache/*
 !data/cache/.gitkeep
 data/output/*
 !data/output/.gitkeep
+data/portfolio.db
 logs/
 *.log
 

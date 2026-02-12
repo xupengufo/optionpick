@@ -132,6 +132,19 @@ class BlackScholesCalculator:
 
 class ProbabilityCalculator:
     """概率计算器"""
+
+    @staticmethod
+    def _prob_st_below_threshold(S: float, threshold: float, T: float,
+                                 sigma: float) -> float:
+        """计算到期价格低于给定阈值的概率"""
+        if S <= 0 or threshold <= 0:
+            return 0.0
+        if T <= 0 or sigma <= 0:
+            return 1.0 if S <= threshold else 0.0
+
+        # 在几何布朗运动且漂移取 0 的近似下，ln(ST/S0)~N((-0.5σ²)T, σ√T)
+        z = (np.log(threshold / S) + 0.5 * sigma**2 * T) / (sigma * np.sqrt(T))
+        return norm.cdf(z)
     
     @staticmethod
     def prob_profit_short_option(S: float, K: float, premium: float, T: float, 
@@ -141,15 +154,15 @@ class ProbabilityCalculator:
             if option_type.lower() == 'call':
                 # 对于卖出看涨期权，盈利当股价低于执行价+权利金
                 breakeven = K + premium
-                # 计算股价低于breakeven的概率
-                d = (np.log(S / breakeven) + (0.0 - 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
-                prob = norm.cdf(d)
+                prob = ProbabilityCalculator._prob_st_below_threshold(
+                    S, breakeven, T, sigma
+                )
             else:
                 # 对于卖出看跌期权，盈利当股价高于执行价-权利金
                 breakeven = K - premium
-                # 计算股价高于breakeven的概率
-                d = (np.log(S / breakeven) + (0.0 - 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
-                prob = 1 - norm.cdf(d)
+                prob = 1 - ProbabilityCalculator._prob_st_below_threshold(
+                    S, breakeven, T, sigma
+                )
             
             return max(0, min(1, prob))
             
@@ -164,12 +177,14 @@ class ProbabilityCalculator:
         try:
             if option_type.lower() == 'call':
                 # 看涨期权价值为零当股价低于执行价
-                d = (np.log(S / K) + (0.0 - 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
-                prob = norm.cdf(d)
+                prob = ProbabilityCalculator._prob_st_below_threshold(
+                    S, K, T, sigma
+                )
             else:
                 # 看跌期权价值为零当股价高于执行价
-                d = (np.log(S / K) + (0.0 - 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
-                prob = 1 - norm.cdf(d)
+                prob = 1 - ProbabilityCalculator._prob_st_below_threshold(
+                    S, K, T, sigma
+                )
             
             return max(0, min(1, prob))
             

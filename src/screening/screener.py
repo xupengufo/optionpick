@@ -43,9 +43,20 @@ class OptionsScreener:
             'target_strategies': ['covered_call', 'cash_secured_put', 'short_strangle',
                                  'bull_put_spread', 'bear_call_spread'],
             'max_results_per_symbol': 5,
+            'max_results_per_strategy_total': 6,
             'spread_width_min': 2,
             'spread_width_max': 10,
         }
+
+    def _get_trading_data(self, symbol: str) -> Dict:
+        """按当前筛选配置获取指定标的交易数据"""
+        min_dte = int(self.config.get('min_days_to_expiry', 7))
+        max_dte = int(self.config.get('max_days_to_expiry', 60))
+        if min_dte > max_dte:
+            min_dte, max_dte = max_dte, min_dte
+        return self.data_manager.get_trading_opportunities(
+            [symbol], target_dte_range=(min_dte, max_dte)
+        )
     
     def screen_covered_calls(self, symbols: List[str]) -> List[Dict]:
         """筛选备兑看涨期权机会"""
@@ -56,7 +67,7 @@ class OptionsScreener:
                 logger.info(f"Screening covered calls for {symbol}")
                 
                 # 获取股票和期权数据
-                trading_data = self.data_manager.get_trading_opportunities([symbol])
+                trading_data = self._get_trading_data(symbol)
                 if symbol not in trading_data:
                     continue
                 
@@ -123,7 +134,7 @@ class OptionsScreener:
                 logger.info(f"Screening cash secured puts for {symbol}")
                 
                 # 获取股票和期权数据
-                trading_data = self.data_manager.get_trading_opportunities([symbol])
+                trading_data = self._get_trading_data(symbol)
                 if symbol not in trading_data:
                     continue
                 
@@ -188,7 +199,7 @@ class OptionsScreener:
             try:
                 logger.info(f"Screening short strangles for {symbol}")
                 
-                trading_data = self.data_manager.get_trading_opportunities([symbol])
+                trading_data = self._get_trading_data(symbol)
                 if symbol not in trading_data:
                     continue
                 
@@ -265,18 +276,29 @@ class OptionsScreener:
     def get_top_opportunities(self, symbols: List[str], max_results: int = 20) -> List[Dict]:
         """获取最佳机会"""
         all_strategies = self.screen_all_strategies(symbols)
-        
-        # 合并所有策略的结果
-        all_opportunities = []
+
+        per_strategy_cap = int(self.config.get('max_results_per_strategy_total', 6))
+        selected = []
+        leftovers = []
+
+        # 先按策略限额取一轮，避免单一策略占满结果
         for strategy_type, opportunities in all_strategies.items():
-            for opp in opportunities:
-                opp['strategy_category'] = strategy_type
-                all_opportunities.append(opp)
-        
-        # 按得分排序
-        all_opportunities.sort(key=lambda x: x.get('score', 0), reverse=True)
-        
-        return all_opportunities[:max_results]
+            for idx, opp in enumerate(opportunities):
+                opp_with_category = opp.copy()
+                opp_with_category['strategy_category'] = strategy_type
+                if idx < per_strategy_cap:
+                    selected.append(opp_with_category)
+                else:
+                    leftovers.append(opp_with_category)
+
+        # 再用剩余高分机会补满
+        selected.sort(key=lambda x: x.get('score', 0), reverse=True)
+        if len(selected) < max_results and leftovers:
+            leftovers.sort(key=lambda x: x.get('score', 0), reverse=True)
+            selected.extend(leftovers[:max_results - len(selected)])
+
+        selected.sort(key=lambda x: x.get('score', 0), reverse=True)
+        return selected[:max_results]
     
     def _validate_stock_price(self, price: float) -> bool:
         """验证股票价格"""
@@ -410,7 +432,7 @@ class OptionsScreener:
         for symbol in symbols:
             try:
                 logger.info(f"Screening bull put spreads for {symbol}")
-                trading_data = self.data_manager.get_trading_opportunities([symbol])
+                trading_data = self._get_trading_data(symbol)
                 if symbol not in trading_data:
                     continue
                 
@@ -438,6 +460,8 @@ class OptionsScreener:
                     puts = [p for p in opp['options_data']['puts']
                             if self._validate_option_liquidity(p)
                             and p['strike'] < stock_price]
+                    # 统一按执行价从高到低，保证 short leg 在前（避免数据源排序差异）
+                    puts = sorted(puts, key=lambda x: x.get('strike', 0), reverse=True)
                     
                     # 寻找配对: short put (higher) + long put (lower)
                     for i, short_put in enumerate(puts):
@@ -472,7 +496,7 @@ class OptionsScreener:
         for symbol in symbols:
             try:
                 logger.info(f"Screening bear call spreads for {symbol}")
-                trading_data = self.data_manager.get_trading_opportunities([symbol])
+                trading_data = self._get_trading_data(symbol)
                 if symbol not in trading_data:
                     continue
                 
@@ -500,6 +524,8 @@ class OptionsScreener:
                     calls = [c for c in opp['options_data']['calls']
                              if self._validate_option_liquidity(c)
                              and c['strike'] > stock_price]
+                    # 统一按执行价从低到高，保证 short leg 在前
+                    calls = sorted(calls, key=lambda x: x.get('strike', 0))
                     
                     # 寻找配对: short call (lower) + long call (higher)
                     for i, short_call in enumerate(calls):

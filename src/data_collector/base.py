@@ -14,6 +14,14 @@ import os
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+try:
+    import lxml  # noqa: F401
+    _HAS_LXML = True
+except Exception:
+    _HAS_LXML = False
+
+_MISSING_LXML_NOTIFIED = False
+
 class DataCollector:
     """数据收集器基础类"""
     
@@ -46,6 +54,32 @@ class DataCollector:
 
 class StockDataCollector(DataCollector):
     """股票数据收集器"""
+
+    @staticmethod
+    def _timestamp_to_datetime(value) -> Optional[datetime]:
+        """将时间戳安全转换为 datetime"""
+        try:
+            if value is None:
+                return None
+            ts = float(value)
+            if ts <= 0:
+                return None
+            return datetime.fromtimestamp(ts)
+        except (TypeError, ValueError, OSError):
+            return None
+
+    def _extract_earnings_from_info(self, info: Dict) -> Tuple[Optional[str], Optional[int]]:
+        """优先从 ticker.info 里提取下一次财报日期"""
+        now = datetime.now()
+        candidates = []
+        for key in ('earningsTimestamp', 'earningsTimestampStart', 'earningsTimestampEnd'):
+            dt = self._timestamp_to_datetime(info.get(key))
+            if dt and dt >= now:
+                candidates.append(dt)
+        if candidates:
+            nearest = min(candidates)
+            return nearest.strftime('%Y-%m-%d'), (nearest - now).days
+        return None, None
     
     def get_stock_info(self, symbol: str) -> Dict:
         """获取股票基本信息"""
@@ -60,23 +94,36 @@ class StockDataCollector(DataCollector):
             info = ticker.info
             
             # 获取财报日期
-            next_earnings_date = None
-            days_to_earnings = None
-            try:
-                earnings_dates = ticker.get_earnings_dates(limit=4)
-                if earnings_dates is not None and not earnings_dates.empty:
-                    now = datetime.now()
-                    future_dates = [
-                        d.to_pydatetime().replace(tzinfo=None)
-                        for d in earnings_dates.index
-                        if d.to_pydatetime().replace(tzinfo=None) >= now
-                    ]
-                    if future_dates:
-                        nearest = min(future_dates)
-                        next_earnings_date = nearest.strftime('%Y-%m-%d')
-                        days_to_earnings = (nearest - now).days
-            except Exception as e:
-                logger.warning(f"无法获取 {symbol} 财报日期: {e}")
+            next_earnings_date, days_to_earnings = self._extract_earnings_from_info(info)
+            if not next_earnings_date:
+                global _MISSING_LXML_NOTIFIED
+                if _HAS_LXML:
+                    try:
+                        # yfinance 对部分符号会输出高噪音日志，这里临时降噪
+                        yfinance_logger = logging.getLogger("yfinance")
+                        previous_level = yfinance_logger.level
+                        yfinance_logger.setLevel(logging.CRITICAL)
+                        try:
+                            earnings_dates = ticker.get_earnings_dates(limit=4)
+                        finally:
+                            yfinance_logger.setLevel(previous_level)
+
+                        if earnings_dates is not None and not earnings_dates.empty:
+                            now = datetime.now()
+                            future_dates = [
+                                d.to_pydatetime().replace(tzinfo=None)
+                                for d in earnings_dates.index
+                                if d.to_pydatetime().replace(tzinfo=None) >= now
+                            ]
+                            if future_dates:
+                                nearest = min(future_dates)
+                                next_earnings_date = nearest.strftime('%Y-%m-%d')
+                                days_to_earnings = (nearest - now).days
+                    except Exception as e:
+                        logger.debug(f"无法获取 {symbol} 财报日期（fallback）: {e}")
+                elif not _MISSING_LXML_NOTIFIED:
+                    logger.info("未安装 lxml，已跳过 get_earnings_dates 财报抓取（不影响核心功能）")
+                    _MISSING_LXML_NOTIFIED = True
             
             # 提取关键信息
             stock_info = {

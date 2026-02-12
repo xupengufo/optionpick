@@ -1,4 +1,4 @@
-"""
+﻿"""
 美股期权卖方推荐工具主界面
 Main interface for US Options Selling Recommendation Tool
 """
@@ -15,6 +15,7 @@ from typing import Dict, List
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.data_collector.data_manager import DataManager
+from src.data_collector.github_pools import GitHubStockPoolProvider
 from src.screening.screener import OptionsScreener
 from src.screening.criteria import PresetScreens, ScreeningUtils
 from src.risk_management.risk_manager import RiskManager
@@ -41,6 +42,10 @@ class OptionsToolApp:
     
     def __init__(self):
         self.data_manager = DataManager()
+        self.github_pool_provider = GitHubStockPoolProvider(
+            GITHUB_POOL_CONFIG,
+            preferred_symbols=DATA_CONFIG.get("popular_stocks", [])
+        )
         self.screener = OptionsScreener()
         self.risk_manager = RiskManager()
         self.visualizer = OptionsVisualizer()
@@ -61,15 +66,26 @@ class OptionsToolApp:
         if 'selected_symbols' not in st.session_state:
             # 简单的默认股票列表
             st.session_state.selected_symbols = ["AAPL", "MSFT", "TSLA", "SPY", "QQQ"]
+        if 'custom_symbols_input' not in st.session_state:
+            st.session_state.custom_symbols_input = "\n".join(st.session_state.selected_symbols)
         if 'portfolio_capital' not in st.session_state:
             st.session_state.portfolio_capital = 100000
 
     def _get_opportunity_id(self, opportunity: Dict) -> str:
         """生成机会唯一标识"""
         strategy_type = opportunity.get('strategy_type', '')
+        strikes = opportunity.get('strikes', {})
         if strategy_type == 'short_strangle':
-            strikes = opportunity.get('strikes', {})
             strike_part = f"{strikes.get('put_strike', 0)}-{strikes.get('call_strike', 0)}"
+        elif strategy_type == 'bull_put_spread':
+            strike_part = f"{strikes.get('put_long', 0)}-{strikes.get('put_short', 0)}"
+        elif strategy_type == 'bear_call_spread':
+            strike_part = f"{strikes.get('call_short', 0)}-{strikes.get('call_long', 0)}"
+        elif strategy_type == 'iron_condor':
+            strike_part = (
+                f"{strikes.get('put_long', 0)}-{strikes.get('put_short', 0)}-"
+                f"{strikes.get('call_short', 0)}-{strikes.get('call_long', 0)}"
+            )
         else:
             strike_part = f"{opportunity.get('strike', 0)}"
 
@@ -79,6 +95,34 @@ class OptionsToolApp:
             str(opportunity.get('expiry_date', '')),
             strike_part,
         ])
+
+    def _format_opportunity_strike(self, opportunity: Dict) -> str:
+        """格式化不同策略的行权价展示"""
+        def _fmt_price(value) -> str:
+            try:
+                return f"${float(value):.0f}"
+            except (TypeError, ValueError):
+                return str(value)
+
+        strategy_type = opportunity.get('strategy_type', '')
+        strikes = opportunity.get('strikes', {})
+        if strategy_type == 'short_strangle':
+            strikes = opportunity.get('strikes', {})
+            return f"{_fmt_price(strikes.get('put_strike', 0))}/{_fmt_price(strikes.get('call_strike', 0))}"
+        if strategy_type == 'bull_put_spread':
+            return f"{_fmt_price(strikes.get('put_short', 0))}/{_fmt_price(strikes.get('put_long', 0))}"
+        if strategy_type == 'bear_call_spread':
+            return f"{_fmt_price(strikes.get('call_short', 0))}/{_fmt_price(strikes.get('call_long', 0))}"
+        strike = opportunity.get('strike', 0)
+        return _fmt_price(strike)
+
+    def _format_opportunity_label(self, opportunity: Dict) -> str:
+        """格式化机会标签文本"""
+        return (
+            f"{opportunity.get('symbol', '')} "
+            f"{self._format_opportunity_strike(opportunity)} "
+            f"{opportunity.get('strategy_type', '')}"
+        )
 
     def _filter_and_sort_opportunities(self, opportunities: List[Dict]) -> List[Dict]:
         """基于前端控件筛选和排序机会"""
@@ -150,7 +194,7 @@ class OptionsToolApp:
                 "收藏": opp_id in favorite_ids,
                 "Symbol": opp.get('symbol', ''),
                 "Strategy": opp.get('strategy_type', ''),
-                "Strike": opp.get('strike', opp.get('strikes', {}).get('put_strike', 0)),
+                "Strike": self._format_opportunity_strike(opp),
                 "Expiry": opp.get('expiry_date', ''),
                 "Score": round(opp.get('score', 0), 1),
                 "ID": opp_id,
@@ -160,7 +204,7 @@ class OptionsToolApp:
         edited_df = st.data_editor(
             favorite_df,
             hide_index=True,
-            use_container_width=True,
+            width='stretch',
             column_config={"ID": None},
             key="favorite_editor"
         )
@@ -192,7 +236,7 @@ class OptionsToolApp:
             }
             for opp in favorite_opps[:4]
         ])
-        st.dataframe(compare_df, use_container_width=True)
+        st.dataframe(compare_df, width='stretch')
     
     def run(self):
         """运行应用"""
@@ -238,6 +282,57 @@ class OptionsToolApp:
         
         # 股票选择
         st.sidebar.subheader("股票池")
+
+        # GitHub 公开项目指数池
+        source_options = {
+            "手动输入": None,
+            "S&P 500 精选（GitHub）": "sp500",
+            "NASDAQ 100 精选（GitHub）": "nasdaq100",
+            "S&P 500 + NASDAQ 100 精选（GitHub）": "combined",
+        }
+        github_source_label = st.sidebar.selectbox(
+            "指数股票池来源",
+            options=list(source_options.keys()),
+            index=0,
+            help="数据来自 GitHub 公开项目 yfiua/index-constituents"
+        )
+        min_pool_size = int(GITHUB_POOL_CONFIG.get("min_curated_size", 10))
+        max_pool_size = int(GITHUB_POOL_CONFIG.get("max_curated_size", 100))
+        default_pool_size = int(GITHUB_POOL_CONFIG.get("default_curated_size", 30))
+        curated_pool_size = st.sidebar.slider(
+            "精选股票数量",
+            min_value=min_pool_size,
+            max_value=max_pool_size,
+            value=min(max(default_pool_size, min_pool_size), max_pool_size),
+            step=5
+        )
+        if st.sidebar.button("⬇️ 从GitHub加载指数股票池", width='stretch'):
+            source_code = source_options[github_source_label]
+            if source_code is None:
+                st.sidebar.info("当前为手动输入模式，无需加载。")
+            else:
+                with st.sidebar.spinner("正在从 GitHub 获取指数成分股..."):
+                    try:
+                        if source_code == "combined":
+                            symbols = self.github_pool_provider.get_combined_curated_symbols(
+                                ["sp500", "nasdaq100"],
+                                curated_pool_size
+                            )
+                        else:
+                            symbols = self.github_pool_provider.get_curated_symbols(
+                                source_code,
+                                curated_pool_size
+                            )
+                        if symbols:
+                            st.session_state.selected_symbols = symbols
+                            st.session_state.custom_symbols_input = "\n".join(symbols)
+                            st.sidebar.success(f"✅ 已加载 {len(symbols)} 只股票")
+                            st.rerun()
+                        else:
+                            st.sidebar.warning("未获取到有效股票代码，请稍后重试。")
+                    except Exception as e:
+                        logger.error(f"GitHub pool load failed: {e}")
+                        st.sidebar.error(f"加载失败: {e}")
         
         # 自定义股票代码输入
         custom_symbols_input = st.sidebar.text_area(
@@ -245,35 +340,24 @@ class OptionsToolApp:
             height=120,
             help="输入格式：\nAAPL\nMSFT\nTSLA\nGOOGL\n\n支持任何美股代码",
             placeholder="AAPL\nMSFT\nTSLA\nGOOGL\nNVDA",
-            value="\n".join(st.session_state.selected_symbols) if st.session_state.selected_symbols else ""
+            key="custom_symbols_input"
         )
         
         # 处理输入的股票代码
         if custom_symbols_input:
-            input_symbols = [symbol.strip().upper() for symbol in custom_symbols_input.split('\n') if symbol.strip()]
+            raw_symbols = [symbol.strip().upper() for symbol in custom_symbols_input.split('\n') if symbol.strip()]
+            # 去重并保持输入顺序
+            seen = set()
+            input_symbols = []
+            for symbol in raw_symbols:
+                if symbol not in seen:
+                    seen.add(symbol)
+                    input_symbols.append(symbol)
             
             # 显示当前输入的股票
             if input_symbols:
-                st.sidebar.info(f"📊 当前输入: {len(input_symbols)} 只股票")
-                
-                # 验证按钮
-                if st.sidebar.button("✅ 验证并应用", type="primary", use_container_width=True, help="验证股票代码有效性并应用到分析"):
-                    with st.sidebar.spinner("验证股票代码..."):
-                        valid_symbols = []
-                        invalid_symbols = []
-                        
-                        for symbol in input_symbols:
-                            if self.data_manager.validate_symbol(symbol):
-                                valid_symbols.append(symbol)
-                            else:
-                                invalid_symbols.append(symbol)
-                        
-                        if valid_symbols:
-                            st.session_state.selected_symbols = valid_symbols
-                            st.sidebar.success(f"✅ {len(valid_symbols)} 个有效代码已应用")
-                        
-                        if invalid_symbols:
-                            st.sidebar.error(f"❌ 无效代码: {', '.join(invalid_symbols)}")
+                st.session_state.selected_symbols = input_symbols
+                st.sidebar.info(f"📊 当前输入: {len(input_symbols)} 只股票（点击“开始分析”时自动校验）")
             else:
                 st.sidebar.warning("💡 请输入至少一个股票代码")
         else:
@@ -292,6 +376,7 @@ class OptionsToolApp:
             # 清空按钮
             if st.sidebar.button("🗑️ 清空股票列表", help="清空所有已选择的股票"):
                 st.session_state.selected_symbols = []
+                st.session_state.custom_symbols_input = ""
                 st.rerun()
         
         # 筛选预设
@@ -315,7 +400,7 @@ class OptionsToolApp:
         
         # 分析按钮
         st.sidebar.markdown("---")
-        if st.sidebar.button("🚀 开始分析", type="primary", use_container_width=True):
+        if st.sidebar.button("🚀 开始分析", type="primary", width='stretch'):
             self._run_analysis()
     
     def _update_screening_config(self, preset: str, risk_tolerance: str):
@@ -348,18 +433,50 @@ class OptionsToolApp:
         """运行分析"""
         with st.spinner("正在分析期权机会..."):
             try:
+                # 统一校验代码，避免额外“验证并应用”步骤
+                raw_symbols = list(st.session_state.selected_symbols)
+                valid_symbols = []
+                invalid_symbols = []
+                for symbol in raw_symbols:
+                    if self.data_manager.validate_symbol(symbol):
+                        valid_symbols.append(symbol)
+                    else:
+                        invalid_symbols.append(symbol)
+
+                if invalid_symbols:
+                    display = ", ".join(invalid_symbols[:10])
+                    if len(invalid_symbols) > 10:
+                        display += f" ...（共 {len(invalid_symbols)} 个）"
+                    st.warning(f"以下代码无效，已自动忽略: {display}")
+
+                if not valid_symbols:
+                    st.error("没有可用的有效股票代码，请检查输入后重试。")
+                    return
+
+                if valid_symbols != raw_symbols:
+                    st.session_state.selected_symbols = valid_symbols
+                    st.session_state.custom_symbols_input = "\n".join(valid_symbols)
+
                 # 获取市场环境
                 market_context = self.data_manager.get_market_context()
                 
+                # 获取标的波动率快照（用于 IV Rank 分布图）
+                symbols_data = {}
+                for symbol in valid_symbols:
+                    stock_data = self.data_manager.get_complete_stock_data(symbol)
+                    if stock_data:
+                        symbols_data[symbol] = {'stock_data': stock_data}
+                
                 # 筛选机会
                 opportunities = self.screener.get_top_opportunities(
-                    st.session_state.selected_symbols, 
+                    valid_symbols,
                     max_results=20
                 )
                 
                 # 存储结果
                 st.session_state.analysis_results = {
                     'market_context': market_context,
+                    'symbols_data': symbols_data,
                     'opportunities': opportunities,
                     'timestamp': datetime.now()
                 }
@@ -367,7 +484,7 @@ class OptionsToolApp:
                 
                 # 持久化分析历史
                 self.portfolio_store.save_analysis(
-                    symbols=st.session_state.selected_symbols,
+                    symbols=valid_symbols,
                     opportunities=opportunities,
                     market_context=market_context,
                 )
@@ -416,6 +533,16 @@ class OptionsToolApp:
                 st.warning("⚠️ 市场波动性较高，期权权利金丰厚，但需要注意风险管理。")
             else:
                 st.error("🚨 市场极度波动，虽然权利金很高，但风险极大，建议谨慎操作。")
+
+            # IV Rank 分布
+            symbols_data = st.session_state.analysis_results.get('symbols_data', {})
+            if symbols_data:
+                st.subheader("🌡️ IV Rank 分布")
+                iv_rank_fig = self.visualizer.plot_iv_rank_distribution(symbols_data)
+                if iv_rank_fig and len(iv_rank_fig.data) > 0:
+                    st.plotly_chart(iv_rank_fig, width='stretch')
+                else:
+                    st.info("当前样本不足，暂无法生成 IV Rank 分布图。")
         
         else:
             st.info("点击侧边栏的'开始分析'按钮来获取市场数据")
@@ -439,7 +566,7 @@ class OptionsToolApp:
                 if not results_df.empty:
                     st.dataframe(
                         results_df,
-                        use_container_width=True,
+                        width='stretch',
                         height=400
                     )
                     
@@ -495,7 +622,7 @@ class OptionsToolApp:
 
                 # 选择要分析的机会
                 opportunity_options = [
-                    f"{opp.get('symbol', '')} ${opp.get('strike', 0):.0f} {opp.get('strategy_type', '')}"
+                    self._format_opportunity_label(opp)
                     for opp in opportunities[:10]
                 ]
                 
@@ -515,23 +642,27 @@ class OptionsToolApp:
                         st.subheader("📋 基本信息")
                         st.write(f"**股票代码**: {selected_opp.get('symbol', '')}")
                         st.write(f"**策略类型**: {selected_opp.get('strategy_type', '')}")
-                        st.write(f"**执行价**: ${selected_opp.get('strike', 0):.2f}")
+                        st.write(f"**执行价**: {self._format_opportunity_strike(selected_opp)}")
                         st.write(f"**到期日**: {selected_opp.get('expiry_date', '')}")
                         st.write(f"**距离到期**: {selected_opp.get('days_to_expiry', 0)} 天")
                     
                     with col2:
                         st.subheader("💰 收益指标")
                         returns = selected_opp.get('returns', {})
+                        profit_prob = selected_opp.get('probabilities', {}).get(
+                            'prob_profit_short',
+                            returns.get('profit_probability', 0)
+                        )
                         st.write(f"**最大收益**: ${returns.get('max_profit', 0):.2f}")
                         st.write(f"**最大损失**: ${returns.get('max_loss', 0):.2f}")
                         st.write(f"**年化收益率**: {returns.get('annualized_yield', 0):.1f}%")
-                        st.write(f"**盈利概率**: {selected_opp.get('probabilities', {}).get('prob_profit_short', 0):.1f}%")
+                        st.write(f"**盈利概率**: {profit_prob:.1f}%")
                     
                     # 收益图
                     st.subheader("📊 收益图表")
                     try:
                         payoff_fig = self.visualizer.plot_payoff_diagram(selected_opp)
-                        st.plotly_chart(payoff_fig, use_container_width=True)
+                        st.plotly_chart(payoff_fig, width='stretch')
                     except Exception as e:
                         st.error(f"无法生成收益图: {e}")
                     
@@ -552,7 +683,7 @@ class OptionsToolApp:
                     # 时间衰减分析
                     try:
                         time_decay_fig = self.visualizer.plot_time_decay_analysis(selected_opp)
-                        st.plotly_chart(time_decay_fig, use_container_width=True)
+                        st.plotly_chart(time_decay_fig, width='stretch')
                     except Exception as e:
                         st.error(f"无法生成时间衰减图: {e}")
         
@@ -573,7 +704,7 @@ class OptionsToolApp:
                 selected_opp = st.selectbox(
                     "选择要分析风险的交易",
                     opportunities,
-                    format_func=lambda x: f"{x.get('symbol', '')} ${x.get('strike', 0):.0f} {x.get('strategy_type', '')}"
+                    format_func=self._format_opportunity_label
                 )
                 
                 if selected_opp:
@@ -591,10 +722,14 @@ class OptionsToolApp:
                         st.success(f"🟢 **强烈推荐**: {reason}")
                     elif recommendation == 'BUY':
                         st.success(f"🟡 **推荐**: {reason}")
+                    elif recommendation == 'HOLD':
+                        st.info(f"⚪ **持有/观望**: {reason}")
                     elif recommendation == 'CAUTION':
                         st.warning(f"🟠 **谨慎**: {reason}")
-                    else:
+                    elif recommendation == 'AVOID':
                         st.error(f"🔴 **避免**: {reason}")
+                    else:
+                        st.error(f"❌ **状态异常 ({recommendation})**: {reason}")
                     
                     # 风险指标
                     col1, col2, col3 = st.columns(3)
@@ -713,7 +848,7 @@ class OptionsToolApp:
                                 'expiry_date', 'contracts',
                                 'premium_per_contract', 'open_date', 'notes']
                 display_cols = [c for c in display_cols if c in pos_df.columns]
-                st.dataframe(pos_df[display_cols], use_container_width=True,
+                st.dataframe(pos_df[display_cols], width='stretch',
                              hide_index=True)
 
                 # 平仓操作
@@ -790,7 +925,7 @@ class OptionsToolApp:
                             })
                         st.dataframe(
                             pd.DataFrame(roll_data),
-                            use_container_width=True,
+                            width='stretch',
                             hide_index=True
                         )
                     else:
@@ -818,7 +953,7 @@ class OptionsToolApp:
                 display_cols = [c for c in display_cols
                                 if c in closed_df.columns]
                 st.dataframe(closed_df[display_cols],
-                             use_container_width=True, hide_index=True)
+                             width='stretch', hide_index=True)
 
                 total_pnl = closed_df['pnl'].sum()
                 if total_pnl >= 0:
@@ -834,7 +969,7 @@ class OptionsToolApp:
             if history:
                 st.subheader("📜 历史分析记录")
                 hist_df = pd.DataFrame(history)
-                st.dataframe(hist_df, use_container_width=True,
+                st.dataframe(hist_df, width='stretch',
                              hide_index=True)
             else:
                 st.info("暂无分析历史，运行分析后将自动保存")
@@ -920,7 +1055,7 @@ class OptionsToolApp:
                         '开仓日期': p['open_date'],
                         '备注': p['notes']
                     } for p in wheel_positions]),
-                    use_container_width=True
+                    width='stretch'
                 )
                 
                 # 状态流转
@@ -955,3 +1090,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

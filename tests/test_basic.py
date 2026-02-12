@@ -11,6 +11,8 @@ import numpy as np
 from src.option_analytics.pricing import BlackScholesCalculator, ProbabilityCalculator, OptionAnalyzer
 from src.risk_management.risk_manager import RiskCalculator, PositionSizer, RiskManager
 from src.screening.screener import OptionsScreener
+from src.visualization.charts import OptionsVisualizer
+from src.data_collector.github_pools import GitHubStockPoolProvider
 
 class TestBlackScholesCalculator(unittest.TestCase):
     """测试Black-Scholes计算器"""
@@ -94,6 +96,30 @@ class TestProbabilityCalculator(unittest.TestCase):
         self.assertLess(lower, 100)
         self.assertGreater(upper, 100)
         self.assertGreater(upper - lower, 0)
+
+    def test_short_option_profit_probability_direction(self):
+        """测试卖方盈利概率方向是否正确"""
+        # short call: breakeven 远高于现价，应为高盈利概率
+        call_high = self.prob_calc.prob_profit_short_option(
+            S=100, K=150, premium=0, T=0.25, sigma=0.2, option_type='call'
+        )
+        # short call: breakeven 远低于现价，应为低盈利概率
+        call_low = self.prob_calc.prob_profit_short_option(
+            S=100, K=50, premium=0, T=0.25, sigma=0.2, option_type='call'
+        )
+        self.assertGreater(call_high, 0.95)
+        self.assertLess(call_low, 0.05)
+
+        # short put: breakeven 远低于现价，应为高盈利概率
+        put_high = self.prob_calc.prob_profit_short_option(
+            S=100, K=50, premium=0, T=0.25, sigma=0.2, option_type='put'
+        )
+        # short put: breakeven 远高于现价，应为低盈利概率
+        put_low = self.prob_calc.prob_profit_short_option(
+            S=100, K=150, premium=0, T=0.25, sigma=0.2, option_type='put'
+        )
+        self.assertGreater(put_high, 0.95)
+        self.assertLess(put_low, 0.05)
 
 class TestRiskCalculator(unittest.TestCase):
     """测试风险计算器"""
@@ -273,6 +299,33 @@ class TestOptionsScreenerConfigEnforcement(unittest.TestCase):
         }
         self.assertTrue(self.screener._validate_short_strangle(valid))
 
+    def test_top_opportunities_balances_strategy_mix(self):
+        self.screener.config.update({'max_results_per_strategy_total': 1})
+
+        def _make_opp(strategy_type, score):
+            return {
+                'strategy_type': strategy_type,
+                'symbol': 'TEST',
+                'score': score
+            }
+
+        self.screener.screen_all_strategies = lambda symbols: {
+            'bear_call_spreads': [
+                _make_opp('bear_call_spread', 99),
+                _make_opp('bear_call_spread', 98),
+                _make_opp('bear_call_spread', 97),
+            ],
+            'cash_secured_puts': [
+                _make_opp('cash_secured_put', 60),
+                _make_opp('cash_secured_put', 59),
+            ]
+        }
+
+        results = self.screener.get_top_opportunities(['TEST'], max_results=3)
+        types = [r.get('strategy_type') for r in results]
+        self.assertIn('bear_call_spread', types)
+        self.assertIn('cash_secured_put', types)
+
 
 class TestStrategySchemaConsistency(unittest.TestCase):
     """测试策略输出字段一致性"""
@@ -308,6 +361,148 @@ class TestStrategySchemaConsistency(unittest.TestCase):
         self.assertGreaterEqual(result['returns']['annualized_yield'], 0)
 
 
+class TestOptionsVisualizer(unittest.TestCase):
+    """测试可视化收益与IV Rank计算"""
+
+    def setUp(self):
+        self.visualizer = OptionsVisualizer(style="light")
+
+    def test_spread_payoff_not_flat(self):
+        prices = np.array([80.0, 100.0, 120.0])
+
+        bull_put = {
+            'strategy_type': 'bull_put_spread',
+            'strikes': {'put_short': 95, 'put_long': 90},
+            'returns': {'net_credit': 120}
+        }
+        bull_payoff = self.visualizer._calculate_payoffs(bull_put, prices)
+        self.assertLess(bull_payoff[0], bull_payoff[1])
+        self.assertEqual(bull_payoff[1], 120)
+        self.assertEqual(bull_payoff[2], 120)
+
+        bear_call = {
+            'strategy_type': 'bear_call_spread',
+            'strikes': {'call_short': 105, 'call_long': 110},
+            'returns': {'net_credit': 150}
+        }
+        bear_payoff = self.visualizer._calculate_payoffs(bear_call, prices)
+        self.assertEqual(bear_payoff[0], 150)
+        self.assertEqual(bear_payoff[1], 150)
+        self.assertLess(bear_payoff[2], bear_payoff[1])
+
+    def test_iv_rank_estimation(self):
+        stock_data = {
+            'current_volatility': 0.35,
+            'historical_data': {
+                'Volatility': {'a': 0.1, 'b': 0.2, 'c': 0.3, 'd': 0.4}
+            }
+        }
+        iv_rank = self.visualizer._estimate_iv_rank(stock_data)
+        self.assertGreaterEqual(iv_rank, 70)
+        self.assertLessEqual(iv_rank, 80)
+
+        fallback_rank = self.visualizer._estimate_iv_rank({'current_volatility': 0})
+        self.assertEqual(fallback_rank, 50.0)
+
+
+class TestGitHubStockPoolProvider(unittest.TestCase):
+    """测试 GitHub 股票池加载与精选逻辑"""
+
+    def test_normalize_symbols(self):
+        symbols = GitHubStockPoolProvider._normalize_symbols(
+            ["aapl", "AAPL", " msft ", "BRK.B", "INVALID-1", "", None]
+        )
+        self.assertEqual(symbols, ["AAPL", "MSFT", "BRK.B"])
+
+    def test_curated_prefers_popular_symbols(self):
+        cfg = {
+            "sources": {
+                "sp500": {
+                    "url": "unused",
+                    "symbol_columns": ["Symbol"]
+                }
+            }
+        }
+        provider = GitHubStockPoolProvider(
+            cfg,
+            preferred_symbols=["MSFT", "AAPL", "NVDA"]
+        )
+        curated = provider._build_curated(
+            ["AAPL", "GOOGL", "MSFT", "TSLA"],
+            size=3
+        )
+        # 优先保留热门列表中的成分股，再补齐
+        self.assertEqual(curated, ["MSFT", "AAPL", "GOOGL"])
+
+
+class TestSpreadPairOrdering(unittest.TestCase):
+    """测试价差配对在常见升序链表下可正常产出机会"""
+
+    def test_bull_put_spread_handles_ascending_put_chain(self):
+        screener = OptionsScreener()
+        screener.config.update({
+            'min_volume': 1,
+            'min_open_interest': 1,
+            'spread_width_min': 2,
+            'spread_width_max': 10,
+            'max_results_per_symbol': 10,
+        })
+
+        class DummyDataManager:
+            def get_trading_opportunities(self, symbols, target_dte_range=(14, 45)):
+                return {
+                    'TEST': {
+                        'stock_data': {
+                            'basic_info': {
+                                'current_price': 105.0,
+                                'days_to_earnings': None,
+                                'next_earnings_date': None,
+                            }
+                        },
+                        'opportunities': [{
+                            'expiry_date': '2099-01-01',
+                            'days_to_expiry': 30,
+                            # 常见情况：按 strike 升序
+                            'options_data': {
+                                'puts': [
+                                    {'strike': 90, 'bid': 0.5, 'ask': 0.55, 'volume': 100, 'openInterest': 200},
+                                    {'strike': 95, 'bid': 1.0, 'ask': 1.08, 'volume': 100, 'openInterest': 200},
+                                    {'strike': 100, 'bid': 2.0, 'ask': 2.16, 'volume': 100, 'openInterest': 200},
+                                ],
+                                'calls': [],
+                            }
+                        }]
+                    }
+                }
+
+        class DummyStrategyAnalyzer:
+            @staticmethod
+            def analyze_bull_put_spread(stock_price, short_put, long_put, days_to_expiry):
+                return {
+                    'strategy_type': 'bull_put_spread',
+                    'strike': short_put['strike'],
+                    'returns': {
+                        'net_credit': 100,
+                        'annualized_yield': 20,
+                        'max_profit': 100,
+                        'max_loss': 300,
+                        'profit_probability': 60,
+                    },
+                    'probabilities': {'prob_profit_short': 60},
+                    'greeks': {'delta': 0.2},
+                    'option_details': {'liquidity': {'volume': 100, 'open_interest': 200, 'bid_ask_spread_pct': 5}},
+                }
+
+            @staticmethod
+            def rank_selling_opportunities(opportunities):
+                return opportunities
+
+        screener.data_manager = DummyDataManager()
+        screener.strategy_analyzer = DummyStrategyAnalyzer()
+        results = screener.screen_bull_put_spreads(['TEST'])
+        self.assertGreater(len(results), 0)
+
+
 def run_all_tests():
     """运行所有测试"""
     print("运行期权工具基础测试...")
@@ -321,7 +516,10 @@ def run_all_tests():
         TestPositionSizer,
         TestRiskManager,
         TestOptionsScreenerConfigEnforcement,
-        TestStrategySchemaConsistency
+        TestStrategySchemaConsistency,
+        TestOptionsVisualizer,
+        TestGitHubStockPoolProvider,
+        TestSpreadPairOrdering
     ]
     
     total_tests = 0
@@ -360,9 +558,9 @@ def run_all_tests():
     print(f"成功率: {(passed_tests/total_tests*100):.1f}%" if total_tests > 0 else "0.0%")
     
     if failed_tests == 0:
-        print("🎉 所有测试都通过了!")
+        print("[PASS] 所有测试都通过了!")
     else:
-        print(f"⚠️  有 {failed_tests} 个测试失败")
+        print(f"[FAIL] 有 {failed_tests} 个测试失败")
 
 if __name__ == "__main__":
     run_all_tests()
