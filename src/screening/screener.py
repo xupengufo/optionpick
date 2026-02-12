@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 from ..data_collector.data_manager import DataManager
 from ..option_analytics.strategies import StrategyAnalyzer
 from ..option_analytics.pricing import OptionAnalyzer
+from .criteria import ScreeningUtils
 
 logger = logging.getLogger(__name__)
 
@@ -39,8 +40,11 @@ class OptionsScreener:
             'min_profit_probability': 0,
             'min_stock_price': 10,
             'max_stock_price': 500,
-            'target_strategies': ['covered_call', 'cash_secured_put', 'short_strangle'],
-            'max_results_per_symbol': 5
+            'target_strategies': ['covered_call', 'cash_secured_put', 'short_strangle',
+                                 'bull_put_spread', 'bear_call_spread'],
+            'max_results_per_symbol': 5,
+            'spread_width_min': 2,
+            'spread_width_max': 10,
         }
     
     def screen_covered_calls(self, symbols: List[str]) -> List[Dict]:
@@ -58,6 +62,8 @@ class OptionsScreener:
                 
                 stock_data = trading_data[symbol]['stock_data']
                 stock_price = stock_data['basic_info'].get('current_price', 0)
+                days_to_earnings = stock_data['basic_info'].get('days_to_earnings')
+                next_earnings = stock_data['basic_info'].get('next_earnings_date')
                 
                 if not self._validate_stock_price(stock_price):
                     continue
@@ -68,6 +74,16 @@ class OptionsScreener:
                     days_to_expiry = opp['days_to_expiry']
                     
                     if not self._validate_expiry(days_to_expiry):
+                        continue
+                    
+                    # 检查财报风险
+                    expiry_date = datetime.strptime(opp['expiry_date'], '%Y-%m-%d')
+                    earnings_risk = ScreeningUtils.is_earnings_week(
+                        symbol, expiry_date, stock_data)
+                    
+                    # 如果配置了避开财报且存在财报风险，跳过
+                    if earnings_risk and self.config.get('avoid_earnings', False):
+                        logger.info(f"跳过 {symbol} {opp['expiry_date']}: 财报期风险")
                         continue
                     
                     # 筛选看涨期权
@@ -82,6 +98,9 @@ class OptionsScreener:
                                 strategy_analysis['symbol'] = symbol
                                 strategy_analysis['expiry_date'] = opp['expiry_date']
                                 strategy_analysis['days_to_expiry'] = days_to_expiry
+                                strategy_analysis['earnings_risk'] = earnings_risk
+                                strategy_analysis['days_to_earnings'] = days_to_earnings
+                                strategy_analysis['next_earnings_date'] = next_earnings
                                 symbol_opportunities.append(strategy_analysis)
                 
                 # 按得分排序并限制数量
@@ -110,6 +129,8 @@ class OptionsScreener:
                 
                 stock_data = trading_data[symbol]['stock_data']
                 stock_price = stock_data['basic_info'].get('current_price', 0)
+                days_to_earnings = stock_data['basic_info'].get('days_to_earnings')
+                next_earnings = stock_data['basic_info'].get('next_earnings_date')
                 
                 if not self._validate_stock_price(stock_price):
                     continue
@@ -120,6 +141,15 @@ class OptionsScreener:
                     days_to_expiry = opp['days_to_expiry']
                     
                     if not self._validate_expiry(days_to_expiry):
+                        continue
+                    
+                    # 检查财报风险
+                    expiry_date = datetime.strptime(opp['expiry_date'], '%Y-%m-%d')
+                    earnings_risk = ScreeningUtils.is_earnings_week(
+                        symbol, expiry_date, stock_data)
+                    
+                    if earnings_risk and self.config.get('avoid_earnings', False):
+                        logger.info(f"跳过 {symbol} {opp['expiry_date']}: 财报期风险")
                         continue
                     
                     # 筛选看跌期权
@@ -134,6 +164,9 @@ class OptionsScreener:
                                 strategy_analysis['symbol'] = symbol
                                 strategy_analysis['expiry_date'] = opp['expiry_date']
                                 strategy_analysis['days_to_expiry'] = days_to_expiry
+                                strategy_analysis['earnings_risk'] = earnings_risk
+                                strategy_analysis['days_to_earnings'] = days_to_earnings
+                                strategy_analysis['next_earnings_date'] = next_earnings
                                 symbol_opportunities.append(strategy_analysis)
                 
                 # 按得分排序并限制数量
@@ -220,6 +253,12 @@ class OptionsScreener:
         
         if 'short_strangle' in self.config['target_strategies']:
             results['short_strangles'] = self.screen_short_strangles(symbols)
+        
+        if 'bull_put_spread' in self.config['target_strategies']:
+            results['bull_put_spreads'] = self.screen_bull_put_spreads(symbols)
+        
+        if 'bear_call_spread' in self.config['target_strategies']:
+            results['bear_call_spreads'] = self.screen_bear_call_spreads(symbols)
         
         return results
     
@@ -361,3 +400,127 @@ class OptionsScreener:
                 unique_opportunities.append(opp)
         
         return unique_opportunities
+    
+    def screen_bull_put_spreads(self, symbols: List[str]) -> List[Dict]:
+        """筛选牛市看跌价差机会 (Bull Put Spread)"""
+        opportunities = []
+        spread_min = self.config.get('spread_width_min', 2)
+        spread_max = self.config.get('spread_width_max', 10)
+        
+        for symbol in symbols:
+            try:
+                logger.info(f"Screening bull put spreads for {symbol}")
+                trading_data = self.data_manager.get_trading_opportunities([symbol])
+                if symbol not in trading_data:
+                    continue
+                
+                stock_data = trading_data[symbol]['stock_data']
+                stock_price = stock_data['basic_info'].get('current_price', 0)
+                days_to_earnings = stock_data['basic_info'].get('days_to_earnings')
+                next_earnings = stock_data['basic_info'].get('next_earnings_date')
+                
+                if not self._validate_stock_price(stock_price):
+                    continue
+                
+                symbol_opps = []
+                
+                for opp in trading_data[symbol]['opportunities']:
+                    days_to_expiry = opp['days_to_expiry']
+                    if not self._validate_expiry(days_to_expiry):
+                        continue
+                    
+                    expiry_date = datetime.strptime(opp['expiry_date'], '%Y-%m-%d')
+                    earnings_risk = ScreeningUtils.is_earnings_week(
+                        symbol, expiry_date, stock_data)
+                    if earnings_risk and self.config.get('avoid_earnings', False):
+                        continue
+                    
+                    puts = [p for p in opp['options_data']['puts']
+                            if self._validate_option_liquidity(p)
+                            and p['strike'] < stock_price]
+                    
+                    # 寻找配对: short put (higher) + long put (lower)
+                    for i, short_put in enumerate(puts):
+                        for long_put in puts[i+1:]:
+                            width = short_put['strike'] - long_put['strike']
+                            if spread_min <= width <= spread_max:
+                                analysis = self.strategy_analyzer.analyze_bull_put_spread(
+                                    stock_price, short_put, long_put, days_to_expiry)
+                                if analysis and analysis.get('returns', {}).get('net_credit', 0) > 0:
+                                    analysis['symbol'] = symbol
+                                    analysis['expiry_date'] = opp['expiry_date']
+                                    analysis['days_to_expiry'] = days_to_expiry
+                                    analysis['earnings_risk'] = earnings_risk
+                                    analysis['days_to_earnings'] = days_to_earnings
+                                    analysis['next_earnings_date'] = next_earnings
+                                    symbol_opps.append(analysis)
+                
+                if symbol_opps:
+                    ranked = self.strategy_analyzer.rank_selling_opportunities(symbol_opps)
+                    opportunities.extend(ranked[:self.config['max_results_per_symbol']])
+            except Exception as e:
+                logger.error(f"Error screening bull put spreads for {symbol}: {e}")
+                continue
+        return opportunities
+    
+    def screen_bear_call_spreads(self, symbols: List[str]) -> List[Dict]:
+        """筛选熊市看涨价差机会 (Bear Call Spread)"""
+        opportunities = []
+        spread_min = self.config.get('spread_width_min', 2)
+        spread_max = self.config.get('spread_width_max', 10)
+        
+        for symbol in symbols:
+            try:
+                logger.info(f"Screening bear call spreads for {symbol}")
+                trading_data = self.data_manager.get_trading_opportunities([symbol])
+                if symbol not in trading_data:
+                    continue
+                
+                stock_data = trading_data[symbol]['stock_data']
+                stock_price = stock_data['basic_info'].get('current_price', 0)
+                days_to_earnings = stock_data['basic_info'].get('days_to_earnings')
+                next_earnings = stock_data['basic_info'].get('next_earnings_date')
+                
+                if not self._validate_stock_price(stock_price):
+                    continue
+                
+                symbol_opps = []
+                
+                for opp in trading_data[symbol]['opportunities']:
+                    days_to_expiry = opp['days_to_expiry']
+                    if not self._validate_expiry(days_to_expiry):
+                        continue
+                    
+                    expiry_date = datetime.strptime(opp['expiry_date'], '%Y-%m-%d')
+                    earnings_risk = ScreeningUtils.is_earnings_week(
+                        symbol, expiry_date, stock_data)
+                    if earnings_risk and self.config.get('avoid_earnings', False):
+                        continue
+                    
+                    calls = [c for c in opp['options_data']['calls']
+                             if self._validate_option_liquidity(c)
+                             and c['strike'] > stock_price]
+                    
+                    # 寻找配对: short call (lower) + long call (higher)
+                    for i, short_call in enumerate(calls):
+                        for long_call in calls[i+1:]:
+                            width = long_call['strike'] - short_call['strike']
+                            if spread_min <= width <= spread_max:
+                                analysis = self.strategy_analyzer.analyze_bear_call_spread(
+                                    stock_price, short_call, long_call, days_to_expiry)
+                                if analysis and analysis.get('returns', {}).get('net_credit', 0) > 0:
+                                    analysis['symbol'] = symbol
+                                    analysis['expiry_date'] = opp['expiry_date']
+                                    analysis['days_to_expiry'] = days_to_expiry
+                                    analysis['earnings_risk'] = earnings_risk
+                                    analysis['days_to_earnings'] = days_to_earnings
+                                    analysis['next_earnings_date'] = next_earnings
+                                    symbol_opps.append(analysis)
+                
+                if symbol_opps:
+                    ranked = self.strategy_analyzer.rank_selling_opportunities(symbol_opps)
+                    opportunities.extend(ranked[:self.config['max_results_per_symbol']])
+            except Exception as e:
+                logger.error(f"Error screening bear call spreads for {symbol}: {e}")
+                continue
+        return opportunities

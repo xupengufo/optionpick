@@ -108,11 +108,29 @@ class ScreeningUtils:
             return 50
     
     @staticmethod
-    def is_earnings_week(symbol: str, target_date: datetime) -> bool:
-        """检查是否为财报周（简化实现）"""
-        # 这里应该连接到财报日历API，简化实现返回False
-        # 在实际应用中，需要集成如Alpha Vantage、Quandl等API
-        return False
+    def is_earnings_week(symbol: str, target_date: datetime,
+                         stock_data: Optional[Dict] = None) -> bool:
+        """检查目标日期是否在财报日前后 7 天内"""
+        try:
+            earnings_date_str = None
+            if stock_data:
+                earnings_date_str = stock_data.get('basic_info', {}).get(
+                    'next_earnings_date')
+            if not earnings_date_str:
+                return False
+            earnings_date = datetime.strptime(earnings_date_str, '%Y-%m-%d')
+            diff = abs((target_date - earnings_date).days)
+            return diff <= 7
+        except Exception as e:
+            logger.warning(f"财报日期检查失败 {symbol}: {e}")
+            return False
+
+    @staticmethod
+    def get_days_to_earnings(stock_data: Optional[Dict] = None) -> Optional[int]:
+        """返回距离下次财报的天数，无数据返回 None"""
+        if not stock_data:
+            return None
+        return stock_data.get('basic_info', {}).get('days_to_earnings')
     
     @staticmethod
     def calculate_liquidity_score(volume: int, open_interest: int, bid_ask_spread_pct: float) -> float:
@@ -254,12 +272,23 @@ class ScreeningUtils:
             results = []
             
             for opp in opportunities:
+                # 财报警告
+                earnings_risk = opp.get('earnings_risk', False)
+                days_to_earn = opp.get('days_to_earnings')
+                if earnings_risk:
+                    earnings_label = f"⚠️ {days_to_earn}天" if days_to_earn is not None else "⚠️"
+                elif days_to_earn is not None:
+                    earnings_label = f"{days_to_earn}天"
+                else:
+                    earnings_label = "-"
+
                 result = {
                     'Symbol': opp.get('symbol', ''),
                     'Strategy': opp.get('strategy_type', ''),
                     'Strike': opp.get('strike', 0),
                     'Expiry': opp.get('expiry_date', ''),
                     'DTE': opp.get('days_to_expiry', 0),
+                    'Earnings': earnings_label,
                     'Premium': opp.get('returns', {}).get('max_profit', 0),
                     'Annualized_Return': f"{opp.get('returns', {}).get('annualized_yield', 0):.1f}%",
                     'Profit_Prob': f"{opp.get('probabilities', {}).get('prob_profit_short', 0):.1f}%",

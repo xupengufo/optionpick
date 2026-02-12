@@ -3,8 +3,9 @@ developmentMode = false
 
 [server]
 headless = true
-enableCORS = false
-enableXsrfProtection = false
+# 安全配置：生产环境应保持开启
+enableCORS = true
+enableXsrfProtection = true
 port = 8501
 
 [browser]

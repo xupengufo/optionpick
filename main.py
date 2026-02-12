@@ -19,6 +19,9 @@ from src.screening.screener import OptionsScreener
 from src.screening.criteria import PresetScreens, ScreeningUtils
 from src.risk_management.risk_manager import RiskManager
 from src.visualization.charts import OptionsVisualizer
+from src.utils.persistence import PortfolioStore
+from src.utils.formatters import format_currency, format_strategy_name
+from src.option_analytics.roll_advisor import RollAdvisor
 from config.config import *
 
 # 配置日志
@@ -41,6 +44,8 @@ class OptionsToolApp:
         self.screener = OptionsScreener()
         self.risk_manager = RiskManager()
         self.visualizer = OptionsVisualizer()
+        self.portfolio_store = PortfolioStore()
+        self.roll_advisor = RollAdvisor()
         
         # 初始化session state
         self._init_session_state()
@@ -360,6 +365,13 @@ class OptionsToolApp:
                 }
                 st.session_state.filtered_opportunities = opportunities
                 
+                # 持久化分析历史
+                self.portfolio_store.save_analysis(
+                    symbols=st.session_state.selected_symbols,
+                    opportunities=opportunities,
+                    market_context=market_context,
+                )
+                
                 st.success(f"分析完成！找到 {len(opportunities)} 个潜在机会")
                 
             except Exception as e:
@@ -620,15 +632,321 @@ class OptionsToolApp:
     def _render_portfolio_management(self):
         """渲染投资组合管理"""
         st.header("📋 投资组合管理")
-        
-        # 这里可以添加投资组合跟踪功能
-        st.info("投资组合管理功能正在开发中...")
-        
-        # 可以添加的功能：
-        # - 当前持仓跟踪
-        # - 投资组合风险分析
-        # - 收益跟踪
-        # - 头寸管理建议
+
+        tab_add, tab_open, tab_closed, tab_history, tab_greeks, tab_wheel = st.tabs([
+            "➕ 添加持仓", "📂 当前持仓", "✅ 已平仓记录",
+            "📜 分析历史", "🎨 Greeks 概览", "🔄 Wheel 策略"
+        ])
+
+        # ===== 添加持仓 =====
+        with tab_add:
+            st.subheader("➕ 新增持仓")
+            col1, col2 = st.columns(2)
+            with col1:
+                symbol = st.text_input("股票代码", value="AAPL",
+                                       key="port_symbol").upper()
+                strategy_type = st.selectbox(
+                    "策略类型",
+                    options=['covered_call', 'cash_secured_put',
+                             'short_strangle', 'iron_condor',
+                             'bull_put_spread', 'bear_call_spread'],
+                    format_func=format_strategy_name,
+                    key="port_strategy"
+                )
+                strike = st.number_input("执行价 ($)", min_value=0.01,
+                                         value=100.0, step=1.0,
+                                         key="port_strike")
+            with col2:
+                expiry = st.date_input("到期日", key="port_expiry")
+                contracts = st.number_input("合约数", min_value=1,
+                                            value=1, step=1,
+                                            key="port_contracts")
+                premium = st.number_input("每张权利金 ($)", min_value=0.0,
+                                          value=1.0, step=0.05,
+                                          key="port_premium")
+                open_date = st.date_input("开仓日期", key="port_open_date")
+            notes = st.text_input("备注", key="port_notes")
+            wheel_state = st.selectbox(
+                "Wheel 状态（可选）",
+                options=['', 'sell_put', 'assigned', 'sell_call',
+                         'called_away', 'idle'],
+                format_func=lambda x: PortfolioStore.WHEEL_STATES.get(
+                    x, '— 不参与 Wheel') if x else '— 不参与 Wheel',
+                key="port_wheel"
+            )
+
+            if st.button("➕ 添加持仓", type="primary",
+                         key="port_add_btn"):
+                pos_id = self.portfolio_store.add_position(
+                    symbol=symbol, strategy_type=strategy_type,
+                    strike=strike, expiry_date=str(expiry),
+                    contracts=contracts,
+                    premium_per_contract=premium,
+                    open_date=str(open_date), notes=notes,
+                    wheel_state=wheel_state,
+                )
+                if pos_id:
+                    st.success(f"✅ 持仓已添加 (ID: {pos_id})")
+                    st.rerun()
+                else:
+                    st.error("添加失败，请检查输入")
+
+        # ===== 当前持仓 =====
+        with tab_open:
+            open_positions = self.portfolio_store.get_positions(status="open")
+            summary = self.portfolio_store.get_portfolio_summary()
+
+            # 汇总指标
+            st.subheader("💼 组合概览")
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("持仓数", summary.get('open_count', 0))
+            m2.metric("已收权利金",
+                      format_currency(summary.get('total_premium_collected', 0)))
+            m3.metric("已实现盈亏",
+                      format_currency(summary.get('realized_pnl', 0)))
+            m4.metric("已平仓数", summary.get('closed_count', 0))
+
+            if open_positions:
+                st.subheader("📂 当前持仓")
+                pos_df = pd.DataFrame(open_positions)
+                display_cols = ['id', 'symbol', 'strategy_type', 'strike',
+                                'expiry_date', 'contracts',
+                                'premium_per_contract', 'open_date', 'notes']
+                display_cols = [c for c in display_cols if c in pos_df.columns]
+                st.dataframe(pos_df[display_cols], use_container_width=True,
+                             hide_index=True)
+
+                # 平仓操作
+                st.subheader("🔒 平仓 / 删除")
+                pos_options = {
+                    f"#{p['id']} {p['symbol']} {format_strategy_name(p['strategy_type'])} ${p['strike']}": p['id']
+                    for p in open_positions
+                }
+                selected_label = st.selectbox("选择持仓",
+                                              options=list(pos_options.keys()),
+                                              key="port_close_select")
+                selected_id = pos_options[selected_label]
+
+                c1, c2 = st.columns(2)
+                with c1:
+                    close_premium = st.number_input(
+                        "平仓权利金 ($/张)", min_value=0.0, value=0.0,
+                        step=0.05, key="port_close_prem"
+                    )
+                    if st.button("🔒 平仓", type="primary",
+                                 key="port_close_btn"):
+                        if self.portfolio_store.close_position(
+                                selected_id, close_premium):
+                            st.success("持仓已平仓")
+                            st.rerun()
+                with c2:
+                    if st.button("🗑️ 删除持仓", key="port_delete_btn"):
+                        if self.portfolio_store.delete_position(selected_id):
+                            st.success("持仓已删除")
+                            st.rerun()
+
+                # ===== 滚仓建议 =====
+                st.subheader("🔄 滚仓建议")
+                st.caption("选择一个持仓，输入当前股价，获取滚仓方案")
+
+                roll_pos_options = {
+                    f"#{p['id']} {p['symbol']} {format_strategy_name(p['strategy_type'])} ${p['strike']}": p
+                    for p in open_positions
+                }
+                roll_selected_label = st.selectbox(
+                    "选择持仓进行滚仓分析",
+                    options=list(roll_pos_options.keys()),
+                    key="roll_pos_select"
+                )
+                roll_position = roll_pos_options[roll_selected_label]
+
+                current_price = st.number_input(
+                    f"当前 {roll_position['symbol']} 股价 ($)",
+                    min_value=0.01, value=float(roll_position['strike']),
+                    step=0.5, key="roll_stock_price"
+                )
+
+                # 快速建议
+                quick_rec = RollAdvisor.get_roll_recommendation(
+                    roll_position, current_price)
+                st.info(quick_rec)
+
+                if st.button("📊 生成滚仓方案", type="primary",
+                             key="roll_generate_btn"):
+                    suggestions = self.roll_advisor.suggest_rolls(
+                        roll_position, current_price)
+
+                    if suggestions:
+                        roll_data = []
+                        for s in suggestions:
+                            roll_data.append({
+                                '方案': s['label'],
+                                '新Strike': f"${s['new_strike']:.0f}",
+                                '新到期日': s['new_expiry'],
+                                '新DTE': f"{s['new_dte']}天",
+                                '预估净收支': RollAdvisor.format_credit(
+                                    s['estimated_credit']),
+                                '说明': s['rationale'],
+                            })
+                        st.dataframe(
+                            pd.DataFrame(roll_data),
+                            use_container_width=True,
+                            hide_index=True
+                        )
+                    else:
+                        st.warning("无可用滚仓方案")
+            else:
+                st.info("暂无持仓，请在 '添加持仓' 页签新增")
+
+        # ===== 已平仓记录 =====
+        with tab_closed:
+            closed_positions = self.portfolio_store.get_positions(
+                status="closed")
+            if closed_positions:
+                st.subheader("✅ 已平仓记录")
+                closed_df = pd.DataFrame(closed_positions)
+                # 计算每笔盈亏
+                closed_df['pnl'] = (
+                    (closed_df['premium_per_contract']
+                     - closed_df['close_premium'].fillna(0))
+                    * closed_df['contracts'] * 100
+                )
+                display_cols = ['id', 'symbol', 'strategy_type', 'strike',
+                                'expiry_date', 'contracts',
+                                'premium_per_contract', 'close_premium',
+                                'pnl', 'open_date', 'close_date']
+                display_cols = [c for c in display_cols
+                                if c in closed_df.columns]
+                st.dataframe(closed_df[display_cols],
+                             use_container_width=True, hide_index=True)
+
+                total_pnl = closed_df['pnl'].sum()
+                if total_pnl >= 0:
+                    st.success(f"总已实现盈亏: {format_currency(total_pnl)}")
+                else:
+                    st.error(f"总已实现盈亏: {format_currency(total_pnl)}")
+            else:
+                st.info("暂无已平仓记录")
+
+        # ===== 分析历史 =====
+        with tab_history:
+            history = self.portfolio_store.get_analysis_history(limit=20)
+            if history:
+                st.subheader("📜 历史分析记录")
+                hist_df = pd.DataFrame(history)
+                st.dataframe(hist_df, use_container_width=True,
+                             hide_index=True)
+            else:
+                st.info("暂无分析历史，运行分析后将自动保存")
+
+        # ===== Greeks 概览 =====
+        with tab_greeks:
+            st.subheader("Σ 风险希腊字母 (Greeks)")
+            greeks_data = self.portfolio_store.get_portfolio_greeks()
+            
+            # 总体指标
+            g1, g2, g3, g4 = st.columns(4)
+            g1.metric("Total Delta", f"{greeks_data.get('total_delta', 0):.2f}",
+                     help="正Delta表示看多，负Delta表示看空")
+            g2.metric("Total Theta", f"{greeks_data.get('total_theta', 0):.2f}",
+                     help="每日时间价值损耗收益")
+            g3.metric("Total Gamma", f"{greeks_data.get('total_gamma', 0):.4f}",
+                     help="Delta随股价变化的敏感度")
+            g4.metric("Total Vega", f"{greeks_data.get('total_vega', 0):.2f}",
+                     help="波动率每变动1%的盈亏影响")
+            
+            # 分标的分布
+            if greeks_data.get('by_symbol'):
+                st.subheader("📊 标的风险分布")
+                by_symbol = pd.DataFrame(greeks_data['by_symbol']).T
+                st.dataframe(by_symbol.style.format("{:.2f}"))
+            
+            # 更新 Greeks
+            st.divider()
+            st.subheader("📝 更新持仓 Greeks")
+            st.caption("由于缺乏实时期权链数据，请手动更新当前 Greeks")
+            
+            open_positions = self.portfolio_store.get_positions(status="open")
+            if open_positions:
+                greeks_opts = {
+                    f"#{p['id']} {p['symbol']} {format_strategy_name(p['strategy_type'])} ${p['strike']}": p
+                    for p in open_positions
+                }
+                selected_g_label = st.selectbox("选择持仓更新", 
+                                              options=list(greeks_opts.keys()),
+                                              key="greeks_update_select")
+                selected_g_pos = greeks_opts[selected_g_label]
+                
+                c1, c2, c3, c4 = st.columns(4)
+                new_delta = c1.number_input("Delta", value=float(selected_g_pos.get('delta', 0.0) or 0.0), step=0.01)
+                new_theta = c2.number_input("Theta", value=float(selected_g_pos.get('theta', 0.0) or 0.0), step=0.01)
+                new_gamma = c3.number_input("Gamma", value=float(selected_g_pos.get('gamma', 0.0) or 0.0), step=0.001, format="%.4f")
+                new_vega = c4.number_input("Vega", value=float(selected_g_pos.get('vega', 0.0) or 0.0), step=0.01)
+                
+                if st.button("💾 更新 Greeks", key="greeks_save_btn"):
+                    self.portfolio_store.update_position_greeks(
+                        selected_g_pos['id'], new_delta, new_theta, new_gamma, new_vega
+                    )
+                    st.success("Greeks 已更新")
+                    st.rerun()
+            else:
+                st.info("无持仓可更新")
+
+        # ===== Wheel 策略跟踪 =====
+        with tab_wheel:
+            st.subheader("🔄 Wheel 策略状态追踪")
+            
+            # 状态说明图
+            st.markdown("""
+            ```mermaid
+            graph LR
+                IDLE((闲置资金)) -->|卖 Put| SP[🔵 卖出 Put]
+                SP -->|过期| SP
+                SP -->|行权| AS[🟡 持有正股]
+                AS -->|卖 Call| SC[🟠 卖出 Call]
+                SC -->|过期| SC
+                SC -->|被叫走| CA[🟢 现金回归]
+                CA --> IDLE
+            ```
+            """)
+            
+            wheel_positions = self.portfolio_store.get_wheel_positions()
+            if wheel_positions:
+                st.dataframe(
+                    pd.DataFrame([{
+                        'Symbol': p['symbol'],
+                        '策略': format_strategy_name(p['strategy_type']),
+                        '当前状态': PortfolioStore.WHEEL_STATES.get(p['wheel_state'], p['wheel_state']),
+                        '开仓日期': p['open_date'],
+                        '备注': p['notes']
+                    } for p in wheel_positions]),
+                    use_container_width=True
+                )
+                
+                # 状态流转
+                st.divider()
+                st.subheader("🔀 状态流转")
+                
+                w_opts = {f"#{p['id']} {p['symbol']}": p for p in wheel_positions}
+                w_sel_label = st.selectbox("选择持仓", options=list(w_opts.keys()), key="wheel_pos_select")
+                w_pos = w_opts[w_sel_label]
+                
+                current_state = w_pos.get('wheel_state', 'idle')
+                st.info(f"当前状态: {PortfolioStore.WHEEL_STATES.get(current_state, current_state)}")
+                
+                new_state = st.selectbox(
+                    "流转到新状态", 
+                    options=['sell_put', 'assigned', 'sell_call', 'called_away', 'idle'],
+                    format_func=lambda x: PortfolioStore.WHEEL_STATES.get(x, x),
+                    key="wheel_new_state"
+                )
+                
+                if st.button("➡️ 确认流转", key="wheel_update_btn"):
+                    self.portfolio_store.update_wheel_state(w_pos['id'], new_state)
+                    st.success(f"状态已更新为: {PortfolioStore.WHEEL_STATES.get(new_state)}")
+                    st.rerun()
+            else:
+                st.info("暂无 Wheel 策略持仓。在'添加持仓'时选择 Wheel 状态即可追踪。")
 
 def main():
     """主函数"""

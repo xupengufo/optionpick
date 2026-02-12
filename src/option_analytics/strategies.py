@@ -266,6 +266,156 @@ class StrategyAnalyzer:
             logger.error(f"Error analyzing short strangle: {e}")
             return {}
     
+    def analyze_bull_put_spread(self, stock_price: float, put_short_data: Dict,
+                                put_long_data: Dict, days_to_expiry: int) -> Dict:
+        """分析牛市看跌价差策略 (Bull Put Spread)
+        卖出较高 Strike Put + 买入较低 Strike Put"""
+        try:
+            short_analysis = self.option_analyzer.analyze_option(
+                put_short_data, stock_price, days_to_expiry)
+            long_analysis = self.option_analyzer.analyze_option(
+                put_long_data, stock_price, days_to_expiry)
+            
+            if not all([short_analysis, long_analysis]):
+                return {}
+            
+            short_strike = put_short_data['strike']
+            long_strike = put_long_data['strike']
+            
+            if short_strike <= long_strike:
+                return {}  # short strike 必须高于 long strike
+            
+            short_premium = short_analysis['basic_info']['mid_price']
+            long_premium = long_analysis['basic_info']['mid_price']
+            
+            net_credit = (short_premium - long_premium) * 100
+            spread_width = (short_strike - long_strike) * 100
+            max_profit = net_credit
+            max_loss = spread_width - net_credit
+            breakeven = short_strike - (net_credit / 100)
+            
+            # 收益率 (基于最大风险)
+            if max_loss > 0:
+                return_on_risk = (max_profit / max_loss) * 100
+                annualized_yield = return_on_risk * (365 / days_to_expiry)
+            else:
+                return_on_risk = 0
+                annualized_yield = 0
+            
+            # 盈利概率估算
+            current_iv = short_analysis['basic_info'].get('implied_volatility', 30)
+            expected_move = stock_price * (current_iv / 100) * np.sqrt(days_to_expiry / 365)
+            distance = stock_price - breakeven
+            if expected_move > 0:
+                profit_prob = min(95, max(5, 50 + (distance / expected_move) * 30))
+            else:
+                profit_prob = 50
+            
+            return {
+                'strategy_type': 'bull_put_spread',
+                'stock_price': stock_price,
+                'strike': short_strike,  # 主 Strike 用于显示
+                'strikes': {
+                    'put_short': short_strike,
+                    'put_long': long_strike,
+                },
+                'premium': net_credit / 100,
+                'returns': {
+                    'net_credit': net_credit,
+                    'max_profit': max_profit,
+                    'max_loss': max_loss,
+                    'breakeven': breakeven,
+                    'return_on_risk': return_on_risk,
+                    'annualized_yield': annualized_yield,
+                    'spread_width': spread_width,
+                    'profit_probability': profit_prob,
+                },
+                'probabilities': {
+                    'prob_profit_short': profit_prob,
+                },
+                'greeks': short_analysis['greeks'],
+                'option_details': short_analysis,
+                'days_to_expiry': days_to_expiry,
+            }
+            
+        except Exception as e:
+            logger.error(f"Error analyzing bull put spread: {e}")
+            return {}
+    
+    def analyze_bear_call_spread(self, stock_price: float, call_short_data: Dict,
+                                  call_long_data: Dict, days_to_expiry: int) -> Dict:
+        """分析熊市看涨价差策略 (Bear Call Spread)
+        卖出较低 Strike Call + 买入较高 Strike Call"""
+        try:
+            short_analysis = self.option_analyzer.analyze_option(
+                call_short_data, stock_price, days_to_expiry)
+            long_analysis = self.option_analyzer.analyze_option(
+                call_long_data, stock_price, days_to_expiry)
+            
+            if not all([short_analysis, long_analysis]):
+                return {}
+            
+            short_strike = call_short_data['strike']
+            long_strike = call_long_data['strike']
+            
+            if long_strike <= short_strike:
+                return {}  # long strike 必须高于 short strike
+            
+            short_premium = short_analysis['basic_info']['mid_price']
+            long_premium = long_analysis['basic_info']['mid_price']
+            
+            net_credit = (short_premium - long_premium) * 100
+            spread_width = (long_strike - short_strike) * 100
+            max_profit = net_credit
+            max_loss = spread_width - net_credit
+            breakeven = short_strike + (net_credit / 100)
+            
+            if max_loss > 0:
+                return_on_risk = (max_profit / max_loss) * 100
+                annualized_yield = return_on_risk * (365 / days_to_expiry)
+            else:
+                return_on_risk = 0
+                annualized_yield = 0
+            
+            current_iv = short_analysis['basic_info'].get('implied_volatility', 30)
+            expected_move = stock_price * (current_iv / 100) * np.sqrt(days_to_expiry / 365)
+            distance = breakeven - stock_price
+            if expected_move > 0:
+                profit_prob = min(95, max(5, 50 + (distance / expected_move) * 30))
+            else:
+                profit_prob = 50
+            
+            return {
+                'strategy_type': 'bear_call_spread',
+                'stock_price': stock_price,
+                'strike': short_strike,
+                'strikes': {
+                    'call_short': short_strike,
+                    'call_long': long_strike,
+                },
+                'premium': net_credit / 100,
+                'returns': {
+                    'net_credit': net_credit,
+                    'max_profit': max_profit,
+                    'max_loss': max_loss,
+                    'breakeven': breakeven,
+                    'return_on_risk': return_on_risk,
+                    'annualized_yield': annualized_yield,
+                    'spread_width': spread_width,
+                    'profit_probability': profit_prob,
+                },
+                'probabilities': {
+                    'prob_profit_short': profit_prob,
+                },
+                'greeks': short_analysis['greeks'],
+                'option_details': short_analysis,
+                'days_to_expiry': days_to_expiry,
+            }
+            
+        except Exception as e:
+            logger.error(f"Error analyzing bear call spread: {e}")
+            return {}
+    
     def rank_selling_opportunities(self, opportunities: List[Dict]) -> List[Dict]:
         """对卖方机会进行排名"""
         try:

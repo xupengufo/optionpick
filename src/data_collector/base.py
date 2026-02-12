@@ -59,6 +59,25 @@ class StockDataCollector(DataCollector):
             ticker = yf.Ticker(symbol)
             info = ticker.info
             
+            # 获取财报日期
+            next_earnings_date = None
+            days_to_earnings = None
+            try:
+                earnings_dates = ticker.get_earnings_dates(limit=4)
+                if earnings_dates is not None and not earnings_dates.empty:
+                    now = datetime.now()
+                    future_dates = [
+                        d.to_pydatetime().replace(tzinfo=None)
+                        for d in earnings_dates.index
+                        if d.to_pydatetime().replace(tzinfo=None) >= now
+                    ]
+                    if future_dates:
+                        nearest = min(future_dates)
+                        next_earnings_date = nearest.strftime('%Y-%m-%d')
+                        days_to_earnings = (nearest - now).days
+            except Exception as e:
+                logger.warning(f"无法获取 {symbol} 财报日期: {e}")
+            
             # 提取关键信息
             stock_info = {
                 'symbol': symbol,
@@ -72,6 +91,8 @@ class StockDataCollector(DataCollector):
                 'dividend_yield': info.get('dividendYield', 0),
                 'sector': info.get('sector', ''),
                 'industry': info.get('industry', ''),
+                'next_earnings_date': next_earnings_date,
+                'days_to_earnings': days_to_earnings,
                 'timestamp': datetime.now().isoformat()
             }
             
