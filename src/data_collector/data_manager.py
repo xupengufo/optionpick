@@ -6,6 +6,7 @@ from .base import StockDataCollector, OptionsDataCollector, MarketDataCollector
 from typing import Dict, List, Tuple
 import logging
 from datetime import datetime, timedelta
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -16,9 +17,19 @@ class DataManager:
         self.stock_collector = StockDataCollector(cache_dir)
         self.options_collector = OptionsDataCollector(cache_dir)
         self.market_collector = MarketDataCollector(cache_dir)
+        self._complete_stock_cache = {}
+        self._trading_opportunities_cache = {}
+        self._cache_ttl_seconds = 300
     
-    def get_complete_stock_data(self, symbol: str) -> Dict:
+    def get_complete_stock_data(self, symbol: str, force_refresh: bool = False) -> Dict:
         """获取完整的股票数据"""
+        cache_key = symbol.upper()
+        now_ts = time.time()
+        if not force_refresh and cache_key in self._complete_stock_cache:
+            cached_ts, cached_data = self._complete_stock_cache[cache_key]
+            if now_ts - cached_ts < self._cache_ttl_seconds:
+                return cached_data
+
         try:
             # 获取基本信息
             stock_info = self.stock_collector.get_stock_info(symbol)
@@ -34,30 +45,41 @@ class DataManager:
             # 获取所有期权到期日
             expirations = self.options_collector.get_all_expirations(symbol)
             
-            return {
+            result = {
                 'basic_info': stock_info,
                 'current_volatility': current_volatility,
                 'expirations': expirations,
                 'historical_data': historical_data.to_dict() if not historical_data.empty else {},
                 'timestamp': datetime.now().isoformat()
             }
+            self._complete_stock_cache[cache_key] = (now_ts, result)
+            return result
             
         except Exception as e:
             logger.error(f"Error getting complete stock data for {symbol}: {e}")
             return {}
     
     def get_trading_opportunities(self, symbols: List[str], 
-                                target_dte_range: Tuple[int, int] = (14, 45)) -> Dict:
+                                target_dte_range: Tuple[int, int] = (14, 45),
+                                force_refresh: bool = False) -> Dict:
         """获取交易机会数据"""
-        opportunities = {}
         min_dte, max_dte = target_dte_range
+        symbols_key = tuple(sorted(set(sym.upper() for sym in symbols)))
+        cache_key = (symbols_key, min_dte, max_dte)
+        now_ts = time.time()
+        if not force_refresh and cache_key in self._trading_opportunities_cache:
+            cached_ts, cached_data = self._trading_opportunities_cache[cache_key]
+            if now_ts - cached_ts < self._cache_ttl_seconds:
+                return cached_data
+
+        opportunities = {}
         
         for symbol in symbols:
             try:
                 logger.info(f"Analyzing {symbol}...")
                 
                 # 获取股票基本数据
-                stock_data = self.get_complete_stock_data(symbol)
+                stock_data = self.get_complete_stock_data(symbol, force_refresh=force_refresh)
                 if not stock_data:
                     continue
                 
@@ -99,6 +121,7 @@ class DataManager:
                 logger.error(f"Error analyzing {symbol}: {e}")
                 continue
         
+        self._trading_opportunities_cache[cache_key] = (now_ts, opportunities)
         return opportunities
     
     def get_market_context(self) -> Dict:

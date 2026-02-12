@@ -35,6 +35,8 @@ class OptionsScreener:
             'min_iv_rank': 20,
             'min_bid_ask_spread_pct': 0,
             'max_bid_ask_spread_pct': 15,
+            'min_annualized_return': 0,
+            'min_profit_probability': 0,
             'min_stock_price': 10,
             'max_stock_price': 500,
             'target_strategies': ['covered_call', 'cash_secured_put', 'short_strangle'],
@@ -79,6 +81,7 @@ class OptionsScreener:
                             if strategy_analysis and self._validate_covered_call(strategy_analysis):
                                 strategy_analysis['symbol'] = symbol
                                 strategy_analysis['expiry_date'] = opp['expiry_date']
+                                strategy_analysis['days_to_expiry'] = days_to_expiry
                                 symbol_opportunities.append(strategy_analysis)
                 
                 # 按得分排序并限制数量
@@ -130,6 +133,7 @@ class OptionsScreener:
                             if strategy_analysis and self._validate_cash_secured_put(strategy_analysis):
                                 strategy_analysis['symbol'] = symbol
                                 strategy_analysis['expiry_date'] = opp['expiry_date']
+                                strategy_analysis['days_to_expiry'] = days_to_expiry
                                 symbol_opportunities.append(strategy_analysis)
                 
                 # 按得分排序并限制数量
@@ -188,6 +192,7 @@ class OptionsScreener:
                                 if strategy_analysis and self._validate_short_strangle(strategy_analysis):
                                     strategy_analysis['symbol'] = symbol
                                     strategy_analysis['expiry_date'] = opp['expiry_date']
+                                    strategy_analysis['days_to_expiry'] = days_to_expiry
                                     symbol_opportunities.append(strategy_analysis)
                 
                 # 按得分排序并限制数量
@@ -276,7 +281,14 @@ class OptionsScreener:
                 return False
             
             # 年化收益率检查
-            if annualized_yield <= 0:
+            min_annualized_return = self.config.get('min_annualized_return', 0)
+            if annualized_yield < min_annualized_return:
+                return False
+
+            # 盈利概率检查
+            prob_profit = strategy_analysis.get('probabilities', {}).get('prob_profit_short', 0)
+            min_profit_probability = self.config.get('min_profit_probability', 0)
+            if prob_profit < min_profit_probability:
                 return False
             
             return True
@@ -298,7 +310,14 @@ class OptionsScreener:
                 return False
             
             # 年化收益率检查
-            if annualized_yield <= 0:
+            min_annualized_return = self.config.get('min_annualized_return', 0)
+            if annualized_yield < min_annualized_return:
+                return False
+
+            # 盈利概率检查
+            prob_profit = strategy_analysis.get('probabilities', {}).get('prob_profit_short', 0)
+            min_profit_probability = self.config.get('min_profit_probability', 0)
+            if prob_profit < min_profit_probability:
                 return False
             
             return True
@@ -314,7 +333,13 @@ class OptionsScreener:
             net_credit = returns.get('net_credit', 0)
             
             # 盈利概率和权利金检查
-            if profit_prob < 30 or net_credit <= 0:
+            min_profit_probability = self.config.get('min_profit_probability', 30)
+            if profit_prob < min_profit_probability or net_credit <= 0:
+                return False
+
+            min_annualized_return = self.config.get('min_annualized_return', 0)
+            annualized_yield = returns.get('annualized_yield', 0)
+            if annualized_yield < min_annualized_return:
                 return False
             
             return True

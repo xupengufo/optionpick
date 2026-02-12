@@ -10,6 +10,8 @@ import logging
 from typing import Dict, List, Optional, Tuple
 import json
 import os
+import glob
+import time
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -19,6 +21,7 @@ class DataCollector:
     
     def __init__(self, cache_dir: str = "data/cache"):
         self.cache_dir = cache_dir
+        self._memory_cache = {}
         os.makedirs(cache_dir, exist_ok=True)
         
     def _get_cache_path(self, symbol: str, data_type: str) -> str:
@@ -44,43 +47,82 @@ class DataCollector:
         except Exception as e:
             logger.warning(f"Failed to save cache: {e}")
 
+    def _load_latest_cache(self, symbol: str, data_type: str) -> Optional[Dict]:
+        """回退加载最近可用缓存（跨日期）"""
+        pattern = os.path.join(self.cache_dir, f"{symbol}_{data_type}_*.json")
+        files = sorted(glob.glob(pattern), reverse=True)
+        for path in files:
+            data = self._load_from_cache(path)
+            if data:
+                return data
+        return None
+
 class StockDataCollector(DataCollector):
     """股票数据收集器"""
     
     def get_stock_info(self, symbol: str) -> Dict:
-        """获取股票基本信息"""
+        """获取股票基本信息（带限流重试和缓存回退）"""
+        memory_key = f"{symbol}_info"
+        if memory_key in self._memory_cache:
+            return self._memory_cache[memory_key]
+
         cache_path = self._get_cache_path(symbol, "info")
         cached_data = self._load_from_cache(cache_path)
-        
         if cached_data:
+            self._memory_cache[memory_key] = cached_data
             return cached_data
-            
-        try:
-            ticker = yf.Ticker(symbol)
-            info = ticker.info
-            
-            # 提取关键信息
-            stock_info = {
-                'symbol': symbol,
-                'company_name': info.get('longName', ''),
-                'current_price': info.get('regularMarketPrice', 0),
-                'market_cap': info.get('marketCap', 0),
-                'volume': info.get('volume', 0),
-                'avg_volume': info.get('averageVolume', 0),
-                'beta': info.get('beta', 0),
-                'pe_ratio': info.get('trailingPE', 0),
-                'dividend_yield': info.get('dividendYield', 0),
-                'sector': info.get('sector', ''),
-                'industry': info.get('industry', ''),
-                'timestamp': datetime.now().isoformat()
-            }
-            
-            self._save_to_cache(stock_info, cache_path)
-            return stock_info
-            
-        except Exception as e:
-            logger.error(f"Error fetching stock info for {symbol}: {e}")
-            return {}
+
+        last_error = None
+        for attempt in range(3):
+            try:
+                ticker = yf.Ticker(symbol)
+                info = ticker.info
+
+                current_price = info.get('regularMarketPrice', 0)
+                if not current_price:
+                    try:
+                        fast_info = ticker.fast_info
+                        current_price = fast_info.get('lastPrice', 0) or fast_info.get('last_price', 0)
+                    except Exception:
+                        pass
+
+                # 提取关键信息
+                stock_info = {
+                    'symbol': symbol,
+                    'company_name': info.get('longName', ''),
+                    'current_price': current_price,
+                    'market_cap': info.get('marketCap', 0),
+                    'volume': info.get('volume', 0),
+                    'avg_volume': info.get('averageVolume', 0),
+                    'beta': info.get('beta', 0),
+                    'pe_ratio': info.get('trailingPE', 0),
+                    'dividend_yield': info.get('dividendYield', 0),
+                    'sector': info.get('sector', ''),
+                    'industry': info.get('industry', ''),
+                    'timestamp': datetime.now().isoformat()
+                }
+
+                if stock_info.get('current_price', 0) > 0:
+                    self._save_to_cache(stock_info, cache_path)
+                    self._memory_cache[memory_key] = stock_info
+                    return stock_info
+
+            except Exception as e:
+                last_error = e
+                # 针对限流做退避
+                if "Too Many Requests" in str(e) and attempt < 2:
+                    time.sleep(1.5 * (attempt + 1))
+                else:
+                    break
+
+        fallback = self._load_latest_cache(symbol, "info")
+        if fallback:
+            logger.warning(f"Using stale cache for {symbol} due to upstream rate limit/error")
+            self._memory_cache[memory_key] = fallback
+            return fallback
+
+        logger.error(f"Error fetching stock info for {symbol}: {last_error}")
+        return {}
     
     def get_historical_data(self, symbol: str, period: str = "1y") -> pd.DataFrame:
         """获取历史价格数据"""
