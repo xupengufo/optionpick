@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 import logging
 import sys
 import os
+from typing import Dict, List
 
 # 添加项目路径
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -48,11 +49,145 @@ class OptionsToolApp:
         """初始化session状态"""
         if 'analysis_results' not in st.session_state:
             st.session_state.analysis_results = None
+        if 'filtered_opportunities' not in st.session_state:
+            st.session_state.filtered_opportunities = []
+        if 'favorite_opportunities' not in st.session_state:
+            st.session_state.favorite_opportunities = []
         if 'selected_symbols' not in st.session_state:
             # 简单的默认股票列表
             st.session_state.selected_symbols = ["AAPL", "MSFT", "TSLA", "SPY", "QQQ"]
         if 'portfolio_capital' not in st.session_state:
             st.session_state.portfolio_capital = 100000
+
+    def _get_opportunity_id(self, opportunity: Dict) -> str:
+        """生成机会唯一标识"""
+        strategy_type = opportunity.get('strategy_type', '')
+        if strategy_type == 'short_strangle':
+            strikes = opportunity.get('strikes', {})
+            strike_part = f"{strikes.get('put_strike', 0)}-{strikes.get('call_strike', 0)}"
+        else:
+            strike_part = f"{opportunity.get('strike', 0)}"
+
+        return "|".join([
+            str(opportunity.get('symbol', '')),
+            str(strategy_type),
+            str(opportunity.get('expiry_date', '')),
+            strike_part,
+        ])
+
+    def _filter_and_sort_opportunities(self, opportunities: List[Dict]) -> List[Dict]:
+        """基于前端控件筛选和排序机会"""
+        if not opportunities:
+            return []
+
+        strategy_options = sorted({opp.get('strategy_type', '') for opp in opportunities if opp.get('strategy_type', '')})
+
+        st.subheader("🎛️ 结果筛选与排序")
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            selected_strategies = st.multiselect(
+                "策略类型",
+                options=strategy_options,
+                default=strategy_options,
+                key="screen_strategy_filter"
+            )
+            min_prob = st.slider("最小盈利概率(%)", 0, 100, 50, key="screen_min_prob")
+        with col2:
+            min_yield = st.slider("最小年化收益率(%)", 0, 100, 5, key="screen_min_yield")
+            min_volume = st.number_input("最小成交量", min_value=0, value=50, step=10, key="screen_min_volume")
+        with col3:
+            sort_by = st.selectbox(
+                "排序字段",
+                options=["综合评分", "年化收益率", "盈利概率", "DTE"],
+                key="screen_sort_by"
+            )
+            sort_desc = st.checkbox("降序排序", value=True, key="screen_sort_desc")
+
+        filtered = []
+        for opp in opportunities:
+            strategy_type = opp.get('strategy_type', '')
+            annualized_yield = opp.get('returns', {}).get('annualized_yield', 0)
+            profit_prob = opp.get('probabilities', {}).get('prob_profit_short', opp.get('returns', {}).get('profit_probability', 0))
+            volume = opp.get('option_details', {}).get('liquidity', {}).get('volume', 0)
+
+            if selected_strategies and strategy_type not in selected_strategies:
+                continue
+            if annualized_yield < min_yield:
+                continue
+            if profit_prob < min_prob:
+                continue
+            if volume < min_volume:
+                continue
+            filtered.append(opp)
+
+        sort_key_map = {
+            "综合评分": lambda x: x.get('score', 0),
+            "年化收益率": lambda x: x.get('returns', {}).get('annualized_yield', 0),
+            "盈利概率": lambda x: x.get('probabilities', {}).get('prob_profit_short', x.get('returns', {}).get('profit_probability', 0)),
+            "DTE": lambda x: x.get('days_to_expiry', 0),
+        }
+
+        filtered.sort(key=sort_key_map[sort_by], reverse=sort_desc)
+        st.caption(f"筛选后结果: {len(filtered)} / {len(opportunities)}")
+        return filtered
+
+    def _render_favorite_manager(self, opportunities: List[Dict]):
+        """渲染收藏管理"""
+        if not opportunities:
+            return
+
+        st.subheader("⭐ 收藏候选")
+        favorite_ids = set(st.session_state.favorite_opportunities)
+        records = []
+        for opp in opportunities[:50]:
+            opp_id = self._get_opportunity_id(opp)
+            records.append({
+                "收藏": opp_id in favorite_ids,
+                "Symbol": opp.get('symbol', ''),
+                "Strategy": opp.get('strategy_type', ''),
+                "Strike": opp.get('strike', opp.get('strikes', {}).get('put_strike', 0)),
+                "Expiry": opp.get('expiry_date', ''),
+                "Score": round(opp.get('score', 0), 1),
+                "ID": opp_id,
+            })
+
+        favorite_df = pd.DataFrame(records)
+        edited_df = st.data_editor(
+            favorite_df,
+            hide_index=True,
+            use_container_width=True,
+            column_config={"ID": None},
+            key="favorite_editor"
+        )
+
+        selected_ids = edited_df.loc[edited_df["收藏"] == True, "ID"].tolist()
+        st.session_state.favorite_opportunities = selected_ids
+        st.caption(f"已收藏 {len(selected_ids)} 个机会，可在详细分析页做对比。")
+
+    def _render_comparison_panel(self, opportunities: List[Dict]):
+        """渲染收藏对比面板"""
+        favorite_ids = set(st.session_state.favorite_opportunities)
+        favorite_opps = [opp for opp in opportunities if self._get_opportunity_id(opp) in favorite_ids]
+
+        if len(favorite_opps) < 2:
+            st.info("收藏至少 2 个机会后，可在此查看并排对比。")
+            return
+
+        st.subheader("🧮 收藏机会对比")
+        compare_df = pd.DataFrame([
+            {
+                "Symbol": opp.get('symbol', ''),
+                "Strategy": opp.get('strategy_type', ''),
+                "DTE": opp.get('days_to_expiry', 0),
+                "AnnualizedYield(%)": round(opp.get('returns', {}).get('annualized_yield', 0), 2),
+                "ProfitProb(%)": round(opp.get('probabilities', {}).get('prob_profit_short', opp.get('returns', {}).get('profit_probability', 0)), 2),
+                "MaxProfit": round(opp.get('returns', {}).get('max_profit', 0), 2),
+                "MaxLoss": opp.get('returns', {}).get('max_loss', 0),
+                "Score": round(opp.get('score', 0), 2),
+            }
+            for opp in favorite_opps[:4]
+        ])
+        st.dataframe(compare_df, use_container_width=True)
     
     def run(self):
         """运行应用"""
@@ -223,6 +358,7 @@ class OptionsToolApp:
                     'opportunities': opportunities,
                     'timestamp': datetime.now()
                 }
+                st.session_state.filtered_opportunities = opportunities
                 
                 st.success(f"分析完成！找到 {len(opportunities)} 个潜在机会")
                 
@@ -278,13 +414,15 @@ class OptionsToolApp:
         
         if st.session_state.analysis_results:
             opportunities = st.session_state.analysis_results['opportunities']
+            filtered_opportunities = self._filter_and_sort_opportunities(opportunities)
+            st.session_state.filtered_opportunities = filtered_opportunities
             
-            if opportunities:
+            if filtered_opportunities:
                 # 机会总览
                 st.subheader("📈 发现的机会")
                 
                 # 格式化结果
-                results_df = ScreeningUtils.format_screening_results(opportunities)
+                results_df = ScreeningUtils.format_screening_results(filtered_opportunities)
                 
                 if not results_df.empty:
                     st.dataframe(
@@ -307,12 +445,12 @@ class OptionsToolApp:
                 col1, col2 = st.columns(2)
                 
                 with col1:
-                    strategy_counts = pd.Series([opp.get('strategy_type', '') for opp in opportunities]).value_counts()
+                    strategy_counts = pd.Series([opp.get('strategy_type', '') for opp in filtered_opportunities]).value_counts()
                     st.bar_chart(strategy_counts)
                 
                 with col2:
                     # 收益率分布
-                    returns = [opp.get('returns', {}).get('annualized_yield', 0) for opp in opportunities]
+                    returns = [opp.get('returns', {}).get('annualized_yield', 0) for opp in filtered_opportunities]
                     if returns:
                         # 创建直方图数据
                         import numpy as np
@@ -324,9 +462,11 @@ class OptionsToolApp:
                         }).set_index('收益率区间')
                         st.bar_chart(hist_df)
                     st.caption("年化收益率分布")
+
+                self._render_favorite_manager(filtered_opportunities)
             
             else:
-                st.warning("未找到符合条件的期权机会，请调整筛选条件")
+                st.warning("未找到符合条件的期权机会，请调整筛选参数")
         
         else:
             st.info("请先运行分析来获取期权机会")
@@ -336,9 +476,11 @@ class OptionsToolApp:
         st.header("📈 详细分析")
         
         if st.session_state.analysis_results:
-            opportunities = st.session_state.analysis_results['opportunities']
+            opportunities = st.session_state.filtered_opportunities or st.session_state.analysis_results['opportunities']
             
             if opportunities:
+                self._render_comparison_panel(opportunities)
+
                 # 选择要分析的机会
                 opportunity_options = [
                     f"{opp.get('symbol', '')} ${opp.get('strike', 0):.0f} {opp.get('strategy_type', '')}"
