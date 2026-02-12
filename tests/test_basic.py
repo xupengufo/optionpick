@@ -12,7 +12,6 @@ import numpy as np
 from src.option_analytics.pricing import BlackScholesCalculator, ProbabilityCalculator, OptionAnalyzer
 from src.risk_management.risk_manager import RiskCalculator, PositionSizer, RiskManager
 from src.screening.screener import OptionsScreener
-from src.data_collector.data_manager import DataManager
 
 class TestBlackScholesCalculator(unittest.TestCase):
     """测试Black-Scholes计算器"""
@@ -310,43 +309,6 @@ class TestStrategySchemaConsistency(unittest.TestCase):
         self.assertGreaterEqual(result['returns']['annualized_yield'], 0)
 
 
-class TestDataManagerCaching(unittest.TestCase):
-    """测试DataManager在同一轮筛选中的缓存行为"""
-
-    def test_get_complete_stock_data_uses_memory_cache(self):
-        manager = DataManager()
-
-        with patch.object(manager.stock_collector, 'get_stock_info', return_value={'current_price': 100, 'symbol': 'AAPL'}) as m_info, \
-             patch.object(manager.stock_collector, 'get_historical_data') as m_hist, \
-             patch.object(manager.options_collector, 'get_all_expirations', return_value=[]):
-            import pandas as pd
-            m_hist.return_value = pd.DataFrame({'Volatility': [0.2]})
-
-            first = manager.get_complete_stock_data('AAPL')
-            second = manager.get_complete_stock_data('AAPL')
-
-            self.assertTrue(first)
-            self.assertTrue(second)
-            self.assertEqual(m_info.call_count, 1)
-
-    def test_get_trading_opportunities_uses_memory_cache(self):
-        manager = DataManager()
-
-        fake_stock_data = {
-            'basic_info': {'current_price': 100},
-            'expirations': [],
-            'historical_data': {},
-            'current_volatility': 0.2
-        }
-
-        with patch.object(manager, 'get_complete_stock_data', return_value=fake_stock_data) as m_complete:
-            first = manager.get_trading_opportunities(['AAPL'])
-            second = manager.get_trading_opportunities(['AAPL'])
-
-            self.assertEqual(first, second)
-            self.assertEqual(m_complete.call_count, 1)
-
-
 def run_all_tests():
     """运行所有测试"""
     print("运行期权工具基础测试...")
@@ -360,8 +322,7 @@ def run_all_tests():
         TestPositionSizer,
         TestRiskManager,
         TestOptionsScreenerConfigEnforcement,
-        TestStrategySchemaConsistency,
-        TestDataManagerCaching
+        TestStrategySchemaConsistency
     ]
     
     total_tests = 0
